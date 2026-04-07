@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Env
+.env
+.venv
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output
+output/
+*.csv
+
+# Keep required host libraries
+!ut_host/sidev_64.dll
+!ut_host/sidev_64.lib
