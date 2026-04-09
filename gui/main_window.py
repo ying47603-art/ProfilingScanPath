@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import QFileDialog, QMessageBox, QVBoxLayout, QWidget
 
-from core.path_planner import compute_arc_length
+from core.path_planner import compute_effective_arc_length
 from gui.controller import GuiController
 from gui.ui.generated.ui_main_window import Ui_MainWindow
 from gui.widgets import ProfilePreview3DWidget, ProfilePreviewWidget
@@ -507,7 +507,7 @@ class MainWindow(QWidget):
             return
 
         if self._controller.profile_points:
-            total_arc_length = compute_arc_length(self._controller.profile_points)[-1]
+            total_arc_length = compute_effective_arc_length(self._controller.profile_points)
             self.ui.dsbSEnd.setValue(float(total_arc_length))
         elif self._controller.scan_path is None and hasattr(self.ui, "dsbSStart"):
             self.ui.dsbSEnd.setValue(float(self.ui.dsbSStart.value()))

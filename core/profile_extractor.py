@@ -139,14 +139,13 @@ def _filter_candidate_outer_chains(chains: list[list[tuple[float, float]]]) -> l
     Rules:
     - reject chains near the axis (`x≈0`)
     - reject chains on the negative-x side
-    - reject near-horizontal end-face chains
+    - keep both vertical and horizontal outer-contour chains
     """
 
     candidates: list[list[tuple[float, float]]] = []
     for chain in chains:
         x_values = [point[0] for point in chain]
         z_values = [point[1] for point in chain]
-        x_span = max(x_values) - min(x_values)
         z_span = max(z_values) - min(z_values)
         avg_x = sum(x_values) / len(x_values)
         max_x = max(x_values)
@@ -155,7 +154,7 @@ def _filter_candidate_outer_chains(chains: list[list[tuple[float, float]]]) -> l
             continue
         if avg_x <= AXIS_CHAIN_TOLERANCE:
             continue
-        if z_span <= max(DEDUPLICATION_TOLERANCE, x_span * HORIZONTAL_CHAIN_RATIO):
+        if z_span <= DEDUPLICATION_TOLERANCE and max_x <= AXIS_CHAIN_TOLERANCE * 2.0:
             continue
 
         candidates.append(chain)
@@ -176,8 +175,9 @@ def _merge_ordered_chains(chains: list[list[tuple[float, float]]]) -> list[list[
             continue
 
         previous = merged[-1]
-        if _point_distance(previous[-1], current[0]) <= CHAIN_MERGE_DISTANCE:
-            merged[-1] = _deduplicate_points(previous + current)
+        merged_chain = _merge_chain_pair(previous, current)
+        if merged_chain is not None:
+            merged[-1] = merged_chain
         else:
             merged.append(current)
 
@@ -188,32 +188,63 @@ def _select_main_outer_chain(chains: list[list[tuple[float, float]]]) -> list[tu
     """Select the main outer contour chain.
 
     Primary score: z coverage range.
-    Secondary score: average x position, to prefer the outer contour over other
+    Secondary score: total polyline length.
+    Tertiary score: average x position, to prefer the outer contour over other
     positive-x chains.
     """
 
     if not chains:
         raise ValueError(EXTRACTION_ERROR)
 
-    def score(chain: list[tuple[float, float]]) -> tuple[float, float]:
+    def score(chain: list[tuple[float, float]]) -> tuple[float, float, float]:
         z_values = [point[1] for point in chain]
         x_values = [point[0] for point in chain]
-        return max(z_values) - min(z_values), sum(x_values) / len(x_values)
+        length = sum(_point_distance(chain[index - 1], chain[index]) for index in range(1, len(chain)))
+        return max(z_values) - min(z_values), length, sum(x_values) / len(x_values)
 
     return max(chains, key=score)
 
 
 def _order_profile_points(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
-    """Order profile points from bottom to top and keep the outer contour."""
+    """Orient an already ordered outer contour from bottom to top."""
 
-    points_by_z: dict[float, float] = {}
-    for point_x, point_z in points:
-        z_key = round(point_z, 6)
-        current_x = points_by_z.get(z_key)
-        if current_x is None or point_x > current_x:
-            points_by_z[z_key] = point_x
+    if not points:
+        return []
 
-    return [(point_x, z_key) for z_key, point_x in sorted(points_by_z.items(), key=lambda item: item[0])]
+    ordered = _deduplicate_points(points)
+    start_z = ordered[0][1]
+    end_z = ordered[-1][1]
+    if start_z > end_z:
+        ordered.reverse()
+    elif abs(start_z - end_z) <= DEDUPLICATION_TOLERANCE and len(ordered) >= 2:
+        if ordered[0][0] > ordered[-1][0]:
+            ordered.reverse()
+    return ordered
+
+
+def _merge_chain_pair(
+    first: list[tuple[float, float]],
+    second: list[tuple[float, float]],
+) -> list[tuple[float, float]] | None:
+    """Merge two ordered chains if any pair of endpoints touch within tolerance."""
+
+    candidates: list[tuple[float, list[tuple[float, float]]]] = []
+    orientations = (
+        (first, second),
+        (first, list(reversed(second))),
+        (list(reversed(first)), second),
+        (list(reversed(first)), list(reversed(second))),
+    )
+    for left_chain, right_chain in orientations:
+        distance = _point_distance(left_chain[-1], right_chain[0])
+        if distance <= CHAIN_MERGE_DISTANCE:
+            candidates.append((distance, _deduplicate_points(left_chain + right_chain)))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
 
 
 def _deduplicate_points(points: list[tuple[float, float]]) -> list[tuple[float, float]]:

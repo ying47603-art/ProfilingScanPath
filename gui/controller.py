@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from core.model_normalizer import normalize_revolved_model
-from core.path_planner import compute_arc_length, generate_scan_path
+from core.path_planner import compute_effective_arc_length, generate_scan_path
 from core.profile_extractor import extract_profile_points
 from core.step_loader import load_step_model
 from data.models import NormalizedStepModel, PathPoint, ScanParams, ScanPath, StepModel
@@ -97,7 +97,7 @@ class GuiController:
         if not self._profile_points:
             raise ValueError("No profile points have been extracted")
 
-        total_arc_length = compute_arc_length(self._profile_points)[-1]
+        total_arc_length = compute_effective_arc_length(self._profile_points)
         resolved_s_end = total_arc_length if s_end is None else s_end
 
         params = ScanParams(
@@ -187,6 +187,7 @@ class GuiController:
         return [
             {
                 "layer_index": float(point.layer_index),
+                "segment_index": float(point.segment_index),
                 "arc_length": float(point.arc_length),
                 "surface_x": float(point.surface_x),
                 "surface_z": float(point.surface_z),
@@ -203,6 +204,7 @@ class GuiController:
 
         return [
             {
+                "Segment": float(point.segment_index),
                 "X": float(point.probe_x),
                 "Y": float(point.probe_y),
                 "Z": float(point.probe_z),

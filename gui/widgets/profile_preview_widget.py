@@ -8,6 +8,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from PyQt6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
+from core.path_planner import split_profile_segments, split_scan_path_segments
 from data.models import ScanPath
 
 
@@ -94,27 +95,23 @@ class ProfilePreviewWidget(QWidget):
     def _draw_profile(self) -> None:
         """Draw the extracted profile polyline and its start/end markers."""
 
-        x_values = [point[0] for point in self._profile_points]
-        z_values = [point[1] for point in self._profile_points]
+        profile_segments = split_profile_segments(self._profile_points)
+        if not profile_segments:
+            return
 
-        self._axes.plot(
-            x_values,
-            z_values,
-            color="#1f77b4",
-            linewidth=2.0,
-            label="Profile",
-        )
+        for index, segment in enumerate(profile_segments):
+            segment_x = [point[0] for point in segment]
+            segment_z = [point[1] for point in segment]
+            self._axes.plot(
+                segment_x,
+                segment_z,
+                color="#1f77b4",
+                linewidth=2.0,
+                label="Profile" if index == 0 else None,
+            )
         self._axes.scatter(
-            x_values,
-            z_values,
-            color="#1f77b4",
-            s=12,
-            alpha=0.8,
-            zorder=2,
-        )
-        self._axes.scatter(
-            [x_values[0]],
-            [z_values[0]],
+            [profile_segments[0][0][0]],
+            [profile_segments[0][0][1]],
             color="#2ca02c",
             s=42,
             marker="o",
@@ -122,8 +119,8 @@ class ProfilePreviewWidget(QWidget):
             label="Start",
         )
         self._axes.scatter(
-            [x_values[-1]],
-            [z_values[-1]],
+            [profile_segments[-1][-1][0]],
+            [profile_segments[-1][-1][1]],
             color="#d62728",
             s=42,
             marker="s",
@@ -132,31 +129,26 @@ class ProfilePreviewWidget(QWidget):
         )
 
     def _draw_scan_path(self) -> None:
-        """Draw surface-path points from the generated scan path."""
-
-        x_values, z_values = self._get_scan_path_coordinates()
-        self._axes.scatter(
-            x_values,
-            z_values,
-            color="#ff7f0e",
-            s=14,
-            alpha=0.9,
-            label="Scan Path",
-        )
-
-    def _get_scan_path_coordinates(self) -> tuple[list[float], list[float]]:
-        """Return preview coordinates for the current scan path.
-
-        V2.0 previews surface points first. This method exists so later we can
-        switch to probe coordinates without changing drawing call sites.
-        """
+        """Draw probe-path points from the generated scan path."""
 
         if self._scan_path is None:
-            return [], []
+            return
 
-        x_values = [point.surface_x for point in self._scan_path.points]
-        z_values = [point.surface_z for point in self._scan_path.points]
-        return x_values, z_values
+        scan_segments = split_scan_path_segments(self._scan_path.points)
+        if not scan_segments:
+            return
+
+        for index, segment in enumerate(scan_segments):
+            segment_x = [point.probe_x for point in segment]
+            segment_z = [point.probe_z for point in segment]
+            self._axes.plot(
+                segment_x,
+                segment_z,
+                color="#ff7f0e",
+                linewidth=1.2,
+                alpha=0.95,
+                label="Scan Path" if index == 0 else None,
+            )
 
     def _draw_empty_hint(self) -> None:
         """Keep the empty-state view clean while preserving axes and grid."""
@@ -172,9 +164,9 @@ class ProfilePreviewWidget(QWidget):
             z_values.extend(point[1] for point in self._profile_points)
 
         if self._scan_path is not None and self._scan_path.points:
-            path_x_values, path_z_values = self._get_scan_path_coordinates()
-            x_values.extend(path_x_values)
-            z_values.extend(path_z_values)
+            for segment in split_scan_path_segments(self._scan_path.points):
+                x_values.extend(point.probe_x for point in segment)
+                z_values.extend(point.probe_z for point in segment)
 
         if not x_values or not z_values:
             self._axes.set_xlim(-10.0, 110.0)

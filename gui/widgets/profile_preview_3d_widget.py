@@ -10,6 +10,7 @@ import pyvista as pv
 from pyvistaqt import QtInteractor
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
+from core.path_planner import split_profile_segments, split_scan_path_segments
 from data.models import ScanPath
 
 
@@ -38,12 +39,14 @@ class ProfilePreview3DWidget(QWidget):
         self._auto_fit_camera = True
 
         self._profile_polyline: Optional[pv.PolyData] = None
+        self._profile_segment_polylines: list[pv.PolyData] = []
         self._profile_points_3d: list[tuple[float, float, float]] = []
         self._wireframe_cache_key: tuple[tuple[tuple[float, float], ...], int] | None = None
         self._wireframe_meshes: list[pv.PolyData] = []
         self._surface_cache_key: tuple[tuple[tuple[float, float], ...], int] | None = None
         self._surface_mesh: Optional[pv.PolyData] = None
         self._scan_path_polyline: Optional[pv.PolyData] = None
+        self._scan_path_segment_polylines: list[pv.PolyData] = []
         self._scan_path_points_3d: list[tuple[float, float, float]] = []
         self._camera_initialized = False
 
@@ -217,6 +220,7 @@ class ProfilePreview3DWidget(QWidget):
         """Clear cached geometry derived from the current profile points."""
 
         self._profile_polyline = None
+        self._profile_segment_polylines = []
         self._profile_points_3d = []
         self._invalidate_wireframe_geometry()
         self._invalidate_surface_geometry()
@@ -237,6 +241,7 @@ class ProfilePreview3DWidget(QWidget):
         """Clear cached geometry derived from the current scan path."""
 
         self._scan_path_polyline = None
+        self._scan_path_segment_polylines = []
         self._scan_path_points_3d = []
 
     def _compute_axis_length(self) -> float:
@@ -272,12 +277,18 @@ class ProfilePreview3DWidget(QWidget):
     def _draw_profile_polyline(self) -> None:
         """Draw the extracted profile in the XZ plane."""
 
-        profile_line = self._get_profile_polyline()
         profile_points = self._get_profile_points_3d()
-        if profile_line is None or not profile_points:
+        profile_lines = self._get_profile_segment_polylines()
+        if not profile_lines or not profile_points:
             return
 
-        self._plotter.add_mesh(profile_line, color="#1f77b4", line_width=5.5, label="Profile")
+        for index, profile_line in enumerate(profile_lines):
+            self._plotter.add_mesh(
+                profile_line,
+                color="#1f77b4",
+                line_width=2.0,
+                label="Profile" if index == 0 else None,
+            )
         self._draw_profile_endpoint_markers(profile_points[0], profile_points[-1])
 
         if self._show_text_labels:
@@ -324,19 +335,19 @@ class ProfilePreview3DWidget(QWidget):
     def _draw_scan_path(self) -> None:
         """Draw the generated 3D scan path using probe coordinates."""
 
-        path_line = self._get_scan_path_polyline()
         path_points = self._get_scan_path_points_3d()
-        if path_line is None or not path_points:
+        path_lines = self._get_scan_path_segment_polylines()
+        if not path_lines or not path_points:
             return
 
-        self._plotter.add_mesh(path_line, color="#f28e2b", line_width=2.5, opacity=0.92, label="Scan Path")
-        self._plotter.add_points(
-            np.asarray(path_points, dtype=float),
-            color="#f6c28b",
-            point_size=4,
-            render_points_as_spheres=True,
-            opacity=0.62,
-        )
+        for index, path_line in enumerate(path_lines):
+            self._plotter.add_mesh(
+                path_line,
+                color="#f28e2b",
+                line_width=2.0,
+                opacity=0.92,
+                label="Scan Path" if index == 0 else None,
+            )
         self._plotter.add_points(
             np.asarray([path_points[0]], dtype=float),
             color="#8e5cff",
@@ -375,6 +386,20 @@ class ProfilePreview3DWidget(QWidget):
         if self._profile_polyline is None and len(self._profile_points) >= 2:
             self._profile_polyline = self._polyline_from_points(self._get_profile_points_3d())
         return self._profile_polyline
+
+    def _get_profile_segment_polylines(self) -> list[pv.PolyData]:
+        """Return cached polylines for each non-horizontal profile segment."""
+
+        if self._profile_segment_polylines or len(self._profile_points) < 2:
+            return self._profile_segment_polylines
+
+        segment_polylines: list[pv.PolyData] = []
+        for segment in split_profile_segments(self._profile_points):
+            segment_points_3d = [(x_value, 0.0, z_value) for x_value, z_value in segment]
+            segment_polylines.append(self._polyline_from_points(segment_points_3d))
+
+        self._profile_segment_polylines = segment_polylines
+        return self._profile_segment_polylines
 
     def _get_wireframe_meshes(self) -> list[pv.PolyData]:
         """Return cached sparse revolution wireframe meshes."""
@@ -442,6 +467,25 @@ class ProfilePreview3DWidget(QWidget):
         if self._scan_path_polyline is None and self._scan_path is not None and len(self._scan_path.points) >= 2:
             self._scan_path_polyline = self._polyline_from_points(self._get_scan_path_points_3d())
         return self._scan_path_polyline
+
+    def _get_scan_path_segment_polylines(self) -> list[pv.PolyData]:
+        """Return cached polylines for each independent scan-path segment."""
+
+        if self._scan_path_segment_polylines or self._scan_path is None or len(self._scan_path.points) < 2:
+            return self._scan_path_segment_polylines
+
+        segment_polylines: list[pv.PolyData] = []
+        for segment in split_scan_path_segments(self._scan_path.points):
+            if len(segment) < 2:
+                continue
+            segment_points = [
+                (point.probe_x, point.probe_y, point.probe_z)
+                for point in segment
+            ]
+            segment_polylines.append(self._polyline_from_points(segment_points))
+
+        self._scan_path_segment_polylines = segment_polylines
+        return self._scan_path_segment_polylines
 
     def _get_wireframe_copy_count(self) -> int:
         """Return a sparse wireframe count derived from the current revolve resolution."""

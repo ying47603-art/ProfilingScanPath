@@ -13,6 +13,64 @@ ProfilePoint = tuple[float, float]
 FLOAT_TOLERANCE = 1e-9
 
 
+def split_profile_segments(profile_points: Sequence[ProfilePoint]) -> list[list[ProfilePoint]]:
+    """Split a profile into usable non-horizontal segments.
+
+    Horizontal spans are treated as discontinuities so side-wall segments can be
+    processed independently for path generation and preview.
+    """
+
+    if len(profile_points) < 2:
+        return []
+
+    segments: list[list[ProfilePoint]] = []
+    current_segment: list[ProfilePoint] = [profile_points[0]]
+
+    for point in profile_points[1:]:
+        prev_x, prev_z = current_segment[-1]
+        curr_x, curr_z = point
+        dx = curr_x - prev_x
+        dz = curr_z - prev_z
+
+        if math.isclose(dz, 0.0, abs_tol=FLOAT_TOLERANCE) and not math.isclose(dx, 0.0, abs_tol=FLOAT_TOLERANCE):
+            if len(current_segment) >= 2:
+                segments.append(current_segment)
+            current_segment = [point]
+            continue
+
+        current_segment.append(point)
+
+    if len(current_segment) >= 2:
+        segments.append(current_segment)
+
+    return segments
+
+
+def compute_effective_arc_length(profile_points: Sequence[ProfilePoint]) -> float:
+    """Return the total arc length over non-horizontal usable profile segments."""
+
+    total_length = 0.0
+    for segment in split_profile_segments(profile_points):
+        total_length += compute_arc_length(segment)[-1]
+    return total_length
+
+
+def split_scan_path_segments(path_points: Sequence[PathPoint]) -> list[list[PathPoint]]:
+    """Split generated scan-path points into independent profile-side segments."""
+
+    if not path_points:
+        return []
+
+    segments: list[list[PathPoint]] = [[path_points[0]]]
+    for point in path_points[1:]:
+        if point.segment_index != segments[-1][-1].segment_index:
+            segments.append([point])
+        else:
+            segments[-1].append(point)
+
+    return [segment for segment in segments if segment]
+
+
 def compute_arc_length(profile_points: Sequence[ProfilePoint]) -> list[float]:
     """Compute cumulative arc lengths for an ordered XZ profile."""
 
@@ -137,8 +195,18 @@ def generate_scan_path(
 ) -> ScanPath:
     """Generate a layered scan path from an extracted XZ profile."""
 
-    arc_lengths = compute_arc_length(profile_points)
-    total_arc_length = arc_lengths[-1]
+    profile_segments = split_profile_segments(profile_points)
+    if not profile_segments:
+        raise ValueError("profile_points must contain at least one non-horizontal segment")
+
+    segment_arc_lengths = [compute_arc_length(segment) for segment in profile_segments]
+    segment_lengths = [arc_lengths[-1] for arc_lengths in segment_arc_lengths]
+    segment_offsets: list[float] = []
+    running_offset = 0.0
+    for segment_length in segment_lengths:
+        segment_offsets.append(running_offset)
+        running_offset += segment_length
+    total_arc_length = running_offset
 
     if params.layer_step <= FLOAT_TOLERANCE:
         raise ValueError("layer_step must be > 0")
@@ -157,8 +225,12 @@ def generate_scan_path(
 
     while current_s <= params.s_end + FLOAT_TOLERANCE:
         clamped_s = min(current_s, params.s_end)
-        surface_x, surface_z = interpolate_point(profile_points, arc_lengths, clamped_s)
-        nx, nz = compute_normal(profile_points, arc_lengths, clamped_s)
+        segment_index = _locate_segment_index(segment_offsets, segment_lengths, clamped_s)
+        local_s = clamped_s - segment_offsets[segment_index]
+        segment_points = profile_segments[segment_index]
+        arc_lengths = segment_arc_lengths[segment_index]
+        surface_x, surface_z = interpolate_point(segment_points, arc_lengths, local_s)
+        nx, nz = compute_normal(segment_points, arc_lengths, local_s)
 
         probe_x = surface_x + params.water_distance * nx
         probe_z = surface_z + params.water_distance * nz
@@ -174,6 +246,7 @@ def generate_scan_path(
                 probe_y=0.0,
                 probe_z=float(probe_z),
                 tilt_angle_deg=float(tilt_angle_deg),
+                segment_index=segment_index,
             )
         )
 
@@ -184,3 +257,17 @@ def generate_scan_path(
             break
 
     return ScanPath(points=points)
+
+
+def _locate_segment_index(
+    segment_offsets: Sequence[float],
+    segment_lengths: Sequence[float],
+    target_s: float,
+) -> int:
+    """Locate which usable profile segment contains a target arc length."""
+
+    for index, offset in enumerate(segment_offsets):
+        segment_end = offset + segment_lengths[index]
+        if target_s <= segment_end + FLOAT_TOLERANCE:
+            return index
+    return len(segment_offsets) - 1

@@ -27,6 +27,7 @@ class PathPoint:
     probe_y: float
     probe_z: float
     tilt_angle_deg: float
+    segment_index: int = 0
 
 
 @dataclass(frozen=True)
