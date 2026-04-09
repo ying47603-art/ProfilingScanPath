@@ -1,5 +1,5 @@
-"""GUI package placeholder."""
+"""GUI package exports."""
 
-from .window import MainWindowPlaceholder
+from .main_window import MainWindow
 
-__all__ = ["MainWindowPlaceholder"]
+__all__ = ["MainWindow"]

@@ -75,19 +75,15 @@ class GuiController:
         self._profile_points = extract_profile_points(self._normalized_model, num_samples=samples)
         self._scan_path = None
 
-        x_values = [point[0] for point in self._profile_points]
-        z_values = [point[1] for point in self._profile_points]
-
-        return {
-            "axis_origin": self._normalized_model.axis_origin,
-            "axis_direction": self._normalized_model.axis_direction,
-            "has_ocp_shape": self._normalized_model.ocp_shape is not None,
-            "profile_point_count": len(self._profile_points),
-            "min_x": min(x_values),
-            "max_x": max(x_values),
-            "min_z": min(z_values),
-            "max_z": max(z_values),
-        }
+        result = self._profile_stats()
+        result.update(
+            {
+                "axis_origin": self._normalized_model.axis_origin,
+                "axis_direction": self._normalized_model.axis_direction,
+                "has_ocp_shape": self._normalized_model.ocp_shape is not None,
+            }
+        )
+        return result
 
     def generate_path(
         self,
@@ -152,6 +148,39 @@ class GuiController:
             "scan_path_compact": compact_file,
         }
 
+    def flip_z_axis(self) -> dict[str, object]:
+        """Mirror the current profile on the Z axis and clear the stale scan path."""
+
+        if not self._profile_points:
+            raise ValueError("No profile points have been extracted")
+
+        z_values = [point[1] for point in self._profile_points]
+        min_z = min(z_values)
+        max_z = max(z_values)
+        mirrored_profile = [
+            (point_x, min_z + max_z - point_z)
+            for point_x, point_z in reversed(self._profile_points)
+        ]
+
+        self._profile_points = mirrored_profile
+        self._scan_path = None
+        return self._profile_stats()
+
+    def flip_profile_direction(self) -> dict[str, object]:
+        """Reverse the current profile point order and clear the stale scan path."""
+
+        if not self._profile_points:
+            raise ValueError("No profile points have been extracted")
+
+        self._profile_points = list(reversed(self._profile_points))
+        self._scan_path = None
+        return self._profile_stats()
+
+    def clear_scan_path(self) -> None:
+        """Clear the currently generated scan path."""
+
+        self._scan_path = None
+
     def _build_standard_rows(self, points: list[PathPoint]) -> list[dict[str, float]]:
         """Convert path points into the standard CSV row format."""
 
@@ -181,3 +210,16 @@ class GuiController:
             }
             for point in points
         ]
+
+    def _profile_stats(self) -> dict[str, object]:
+        """Return summary statistics for the current profile."""
+
+        x_values = [point[0] for point in self._profile_points]
+        z_values = [point[1] for point in self._profile_points]
+        return {
+            "profile_point_count": len(self._profile_points),
+            "min_x": min(x_values),
+            "max_x": max(x_values),
+            "min_z": min(z_values),
+            "max_z": max(z_values),
+        }
