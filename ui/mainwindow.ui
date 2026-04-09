@@ -624,6 +624,39 @@
                 </property>
                </widget>
               </item>
+              <item row="2" column="2">
+               <widget class="QCheckBox" name="chkShowSurface3D">
+                <property name="text">
+                 <string>显示表面</string>
+                </property>
+               </widget>
+              </item>
+              <item row="4" column="0">
+               <widget class="QLabel" name="label_12">
+                <property name="text">
+                 <string>渲染模式</string>
+                </property>
+               </widget>
+              </item>
+              <item row="8" column="0">
+               <widget class="QPushButton" name="btnResetCamera">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="minimumSize">
+                 <size>
+                  <width>120</width>
+                  <height>32</height>
+                 </size>
+                </property>
+                <property name="text">
+                 <string>重置视角</string>
+                </property>
+               </widget>
+              </item>
               <item row="0" column="0" colspan="3">
                <widget class="QLabel" name="label_13">
                 <property name="sizePolicy">
@@ -640,14 +673,62 @@
                 </property>
                </widget>
               </item>
-              <item row="6" column="0">
-               <widget class="QLabel" name="label_14">
+              <item row="3" column="0">
+               <widget class="QCheckBox" name="chkShowAxis3D">
                 <property name="text">
-                 <string>回转分段数</string>
+                 <string>显示坐标轴</string>
+                </property>
+                <property name="checked">
+                 <bool>true</bool>
                 </property>
                </widget>
               </item>
-              <item row="8" column="0">
+              <item row="5" column="2">
+               <widget class="QSpinBox" name="spnRevolveResolution">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="minimumSize">
+                 <size>
+                  <width>135</width>
+                  <height>0</height>
+                 </size>
+                </property>
+                <property name="minimum">
+                 <number>12</number>
+                </property>
+                <property name="maximum">
+                 <number>180</number>
+                </property>
+                <property name="singleStep">
+                 <number>6</number>
+                </property>
+                <property name="value">
+                 <number>36</number>
+                </property>
+               </widget>
+              </item>
+              <item row="7" column="2">
+               <widget class="QCheckBox" name="chkAutoFitCamera">
+                <property name="text">
+                 <string>自动适配视图</string>
+                </property>
+                <property name="checked">
+                 <bool>true</bool>
+                </property>
+               </widget>
+              </item>
+              <item row="5" column="0">
+               <widget class="QLabel" name="label_14">
+                <property name="text">
+                 <string>基础回转分段数</string>
+                </property>
+               </widget>
+              </item>
+              <item row="7" column="0">
                <widget class="QCheckBox" name="chkSmoothShading">
                 <property name="text">
                  <string>平滑着色</string>
@@ -657,14 +738,24 @@
                 </property>
                </widget>
               </item>
-              <item row="7" column="0">
+              <item row="6" column="0">
                <widget class="QLabel" name="label_15">
                 <property name="text">
                  <string>表面透明度</string>
                 </property>
                </widget>
               </item>
-              <item row="7" column="2">
+              <item row="2" column="0">
+               <widget class="QCheckBox" name="chkShowWireframe3D">
+                <property name="text">
+                 <string>显示回转框线</string>
+                </property>
+                <property name="checked">
+                 <bool>true</bool>
+                </property>
+               </widget>
+              </item>
+              <item row="6" column="2">
                <widget class="QDoubleSpinBox" name="dsbSurfaceOpacity">
                 <property name="sizePolicy">
                  <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
@@ -692,17 +783,7 @@
                 </property>
                </widget>
               </item>
-              <item row="8" column="2">
-               <widget class="QCheckBox" name="chkAutoFitCamera">
-                <property name="text">
-                 <string>自动适配视图</string>
-                </property>
-                <property name="checked">
-                 <bool>true</bool>
-                </property>
-               </widget>
-              </item>
-              <item row="5" column="2">
+              <item row="4" column="2">
                <widget class="QComboBox" name="cmbRenderMode3D">
                 <property name="sizePolicy">
                  <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
@@ -733,13 +814,6 @@
                 </item>
                </widget>
               </item>
-              <item row="2" column="2">
-               <widget class="QCheckBox" name="chkShowSurface3D">
-                <property name="text">
-                 <string>显示表面</string>
-                </property>
-               </widget>
-              </item>
               <item row="3" column="2">
                <widget class="QCheckBox" name="chkShowAxisLine3D">
                 <property name="text">
@@ -757,87 +831,6 @@
                 </property>
                 <property name="checked">
                  <bool>true</bool>
-                </property>
-               </widget>
-              </item>
-              <item row="3" column="0">
-               <widget class="QCheckBox" name="chkShowAxis3D">
-                <property name="text">
-                 <string>显示坐标轴</string>
-                </property>
-                <property name="checked">
-                 <bool>true</bool>
-                </property>
-               </widget>
-              </item>
-              <item row="5" column="0">
-               <widget class="QLabel" name="label_12">
-                <property name="text">
-                 <string>渲染模式</string>
-                </property>
-               </widget>
-              </item>
-              <item row="6" column="2">
-               <widget class="QSpinBox" name="spnRevolveResolution">
-                <property name="sizePolicy">
-                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
-                  <horstretch>0</horstretch>
-                  <verstretch>0</verstretch>
-                 </sizepolicy>
-                </property>
-                <property name="minimumSize">
-                 <size>
-                  <width>135</width>
-                  <height>0</height>
-                 </size>
-                </property>
-                <property name="minimum">
-                 <number>12</number>
-                </property>
-                <property name="maximum">
-                 <number>180</number>
-                </property>
-                <property name="singleStep">
-                 <number>6</number>
-                </property>
-                <property name="value">
-                 <number>36</number>
-                </property>
-               </widget>
-              </item>
-              <item row="2" column="0">
-               <widget class="QCheckBox" name="chkShowWireframe3D">
-                <property name="text">
-                 <string>显示回转框线</string>
-                </property>
-                <property name="checked">
-                 <bool>true</bool>
-                </property>
-               </widget>
-              </item>
-              <item row="4" column="0">
-               <widget class="QCheckBox" name="chkShowLabels3D">
-                <property name="text">
-                 <string>显示标签</string>
-                </property>
-               </widget>
-              </item>
-              <item row="9" column="0">
-               <widget class="QPushButton" name="btnResetCamera">
-                <property name="sizePolicy">
-                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
-                  <horstretch>0</horstretch>
-                  <verstretch>0</verstretch>
-                 </sizepolicy>
-                </property>
-                <property name="minimumSize">
-                 <size>
-                  <width>120</width>
-                  <height>32</height>
-                 </size>
-                </property>
-                <property name="text">
-                 <string>重置视角</string>
                 </property>
                </widget>
               </item>

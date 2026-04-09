@@ -161,11 +161,13 @@ class ProfilePreview3DWidget(QWidget):
 
         self._plotter.clear()
         self._plotter.set_background("#fbfbfb")
+        scene_bounds = self._get_scene_bounds()
 
         if self._show_axes:
             self._plotter.add_axes(line_width=2, labels_off=False)
             self._plotter.show_grid(
                 color="#e0e0e0",
+                bounds=scene_bounds,
                 location="outer",
                 xtitle="X",
                 ytitle="Y",
@@ -173,11 +175,13 @@ class ProfilePreview3DWidget(QWidget):
             )
 
         axis_length = self._compute_axis_length()
+        axis_line_bounds = scene_bounds or (-100.0, 100.0, -100.0, 100.0, 0.0, 100.0)
 
         if self._show_axis_line:
-            self._draw_rotation_axis(axis_length)
+            self._draw_rotation_axis(axis_line_bounds)
 
-        if self._show_surface and self._profile_points and self._render_mode != "wireframe":
+        surface_mode_active = self._is_surface_mode()
+        if surface_mode_active and self._show_surface and self._profile_points:
             surface_mesh = self._get_surface_mesh()
             if surface_mesh is not None:
                 self._plotter.add_mesh(
@@ -191,18 +195,23 @@ class ProfilePreview3DWidget(QWidget):
         if self._show_profile and self._profile_points:
             self._draw_profile_polyline()
 
-        if self._show_revolution_wireframe and self._profile_points:
-            self._draw_revolution_wireframe()
+        if self._show_revolution_wireframe and self._profile_points and not surface_mode_active:
+            self._draw_revolution_wireframe(surface_mode=surface_mode_active)
 
         if self._show_scan_path and self._scan_path is not None and self._scan_path.points:
             self._draw_scan_path()
 
         if self._auto_fit_camera or saved_camera is None:
-            self._set_default_camera(axis_length=axis_length)
+            self._set_default_camera(axis_length=axis_length, scene_bounds=scene_bounds)
         else:
             self._plotter.camera_position = saved_camera
 
         self._camera_initialized = True
+
+    def _is_surface_mode(self) -> bool:
+        """Return whether the current render mode is a true surface mode."""
+
+        return self._render_mode in {"surface_low", "surface_high"}
 
     def _invalidate_profile_geometry(self) -> None:
         """Clear cached geometry derived from the current profile points."""
@@ -233,13 +242,13 @@ class ProfilePreview3DWidget(QWidget):
     def _compute_axis_length(self) -> float:
         """Return a scene scale suitable for the axis helper."""
 
-        x_values, y_values, z_values = self._collect_scene_points()
-        if not x_values or not z_values:
+        scene_bounds = self._get_scene_bounds()
+        if scene_bounds is None:
             return 120.0
 
-        x_span = max(x_values) - min(x_values)
-        y_span = max(y_values) - min(y_values)
-        z_span = max(z_values) - min(z_values)
+        x_span = scene_bounds[1] - scene_bounds[0]
+        y_span = scene_bounds[3] - scene_bounds[2]
+        z_span = scene_bounds[5] - scene_bounds[4]
         return max(x_span, y_span, z_span, 20.0) * 1.2
 
     def _compute_marker_scale(self) -> float:
@@ -247,10 +256,17 @@ class ProfilePreview3DWidget(QWidget):
 
         return max(self._compute_axis_length() * 0.024, 1.1)
 
-    def _draw_rotation_axis(self, axis_length: float) -> None:
+    def _draw_rotation_axis(
+        self,
+        scene_bounds: tuple[float, float, float, float, float, float],
+    ) -> None:
         """Draw the global Z-axis used as the current rotation axis."""
 
-        axis = pv.Line((0.0, 0.0, 0.0), (0.0, 0.0, axis_length), resolution=1)
+        z_min = min(0.0, float(scene_bounds[4]))
+        z_max = max(1.0, float(scene_bounds[5]))
+        z_span = max(z_max - z_min, 1.0)
+        axis_top = z_max + z_span * 0.03
+        axis = pv.Line((0.0, 0.0, z_min), (0.0, 0.0, axis_top), resolution=1)
         self._plotter.add_mesh(axis, color="#8c8c8c", line_width=2.2, opacity=0.82)
 
     def _draw_profile_polyline(self) -> None:
@@ -294,11 +310,16 @@ class ProfilePreview3DWidget(QWidget):
         self._plotter.add_mesh(start_marker, color="#2ca02c", smooth_shading=True)
         self._plotter.add_mesh(end_marker, color="#d62728", smooth_shading=False)
 
-    def _draw_revolution_wireframe(self) -> None:
+    def _draw_revolution_wireframe(self, *, surface_mode: bool) -> None:
         """Draw sparse rotated profile copies to suggest the revolved shape."""
 
+        color = "#d2d2d2" if surface_mode else "#bfbfbf"
+        line_width = 0.55 if surface_mode else 0.95
+        opacity = 0.14 if surface_mode else 0.34
+        if not self._show_surface:
+            opacity = 0.0
         for wire_mesh in self._get_wireframe_meshes():
-            self._plotter.add_mesh(wire_mesh, color="#e3e3e3", line_width=0.7, opacity=0.16)
+            self._plotter.add_mesh(wire_mesh, color=color, line_width=line_width, opacity=opacity)
 
     def _draw_scan_path(self) -> None:
         """Draw the generated 3D scan path using probe coordinates."""
@@ -383,7 +404,7 @@ class ProfilePreview3DWidget(QWidget):
     def _get_surface_mesh(self) -> Optional[pv.PolyData]:
         """Return a cached revolved surface mesh built only for display purposes."""
 
-        if len(self._profile_points) < 2:
+        if len(self._profile_points) < 2 or not self._is_surface_mode():
             return None
 
         effective_resolution = self._get_effective_surface_resolution()
@@ -401,7 +422,7 @@ class ProfilePreview3DWidget(QWidget):
         z_grid = np.outer(np.ones_like(angles), z_values)
 
         surface_grid = pv.StructuredGrid(x_grid, y_grid, z_grid)
-        self._surface_mesh = surface_grid.extract_surface().triangulate()
+        self._surface_mesh = surface_grid.extract_surface(algorithm="dataset_surface").triangulate()
         self._surface_cache_key = cache_key
         return self._surface_mesh
 
@@ -425,16 +446,16 @@ class ProfilePreview3DWidget(QWidget):
     def _get_wireframe_copy_count(self) -> int:
         """Return a sparse wireframe count derived from the current revolve resolution."""
 
-        return max(4, min(12, self._revolve_resolution // 6))
+        return max(8, min(36, self._revolve_resolution // 2))
 
     def _get_effective_surface_resolution(self) -> int:
         """Return the effective surface resolution for the active render mode."""
 
         if self._render_mode == "surface_low":
-            return max(12, self._revolve_resolution // 2)
+            return self._revolve_resolution
         if self._render_mode == "surface_high":
-            return max(12, self._revolve_resolution)
-        return max(12, self._revolve_resolution)
+            return self._revolve_resolution * 2
+        return 0
 
     def _polyline_from_points(self, points: list[tuple[float, float, float]]) -> pv.PolyData:
         """Build a PyVista polyline from an ordered point list."""
@@ -444,8 +465,8 @@ class ProfilePreview3DWidget(QWidget):
         poly_data.lines = np.hstack(([len(points)], np.arange(len(points), dtype=np.int32)))
         return poly_data
 
-    def _collect_scene_points(self) -> tuple[list[float], list[float], list[float]]:
-        """Collect profile and path coordinates for stable camera framing."""
+    def _get_scene_bounds(self) -> Optional[tuple[float, float, float, float, float, float]]:
+        """Return stable scene bounds using profile, path, and virtual revolve extents."""
 
         x_values: list[float] = []
         y_values: list[float] = []
@@ -453,8 +474,8 @@ class ProfilePreview3DWidget(QWidget):
 
         if self._profile_points:
             for x_value, z_value in self._profile_points:
-                x_values.append(x_value)
-                y_values.append(0.0)
+                x_values.extend((-abs(x_value), abs(x_value)))
+                y_values.extend((-abs(x_value), abs(x_value)))
                 z_values.append(z_value)
 
         if self._scan_path is not None and self._scan_path.points:
@@ -463,7 +484,17 @@ class ProfilePreview3DWidget(QWidget):
                 y_values.append(point.probe_y)
                 z_values.append(point.probe_z)
 
-        return x_values, y_values, z_values
+        if not x_values or not z_values:
+            return None
+
+        return (
+            min(x_values),
+            max(x_values),
+            min(y_values),
+            max(y_values),
+            min(z_values),
+            max(z_values),
+        )
 
     def _capture_camera_position(self) -> Optional[list[tuple[float, float, float]]]:
         """Return the current camera position tuple when available."""
@@ -477,26 +508,30 @@ class ProfilePreview3DWidget(QWidget):
             tuple(camera_position[2]),
         ]
 
-    def _set_default_camera(self, axis_length: float) -> None:
+    def _set_default_camera(
+        self,
+        axis_length: float,
+        scene_bounds: Optional[tuple[float, float, float, float, float, float]] = None,
+    ) -> None:
         """Apply a stable engineering-style camera from the right-front-top side."""
 
-        x_values, y_values, z_values = self._collect_scene_points()
-        if not x_values or not y_values or not z_values:
+        bounds = scene_bounds or self._get_scene_bounds()
+        if bounds is None:
             center = np.array([0.0, 0.0, axis_length * 0.35], dtype=float)
             span = axis_length
         else:
             center = np.array(
                 [
-                    (min(x_values) + max(x_values)) / 2.0,
-                    (min(y_values) + max(y_values)) / 2.0,
-                    (min(z_values) + max(z_values)) / 2.0,
+                    (bounds[0] + bounds[1]) / 2.0,
+                    (bounds[2] + bounds[3]) / 2.0,
+                    (bounds[4] + bounds[5]) / 2.0,
                 ],
                 dtype=float,
             )
             span = max(
-                max(x_values) - min(x_values),
-                max(y_values) - min(y_values),
-                max(z_values) - min(z_values),
+                bounds[1] - bounds[0],
+                bounds[3] - bounds[2],
+                bounds[5] - bounds[4],
                 axis_length * 0.55,
             )
 

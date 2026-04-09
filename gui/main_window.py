@@ -101,7 +101,6 @@ class MainWindow(QWidget):
             "chkShowSurface3D",
             "chkShowAxis3D",
             "chkShowAxisLine3D",
-            "chkShowLabels3D",
             "chkSmoothShading",
             "chkAutoFitCamera",
         ]
@@ -116,9 +115,7 @@ class MainWindow(QWidget):
                 widget.valueChanged.connect(lambda _value=0: self._apply_3d_display_settings())
 
         if hasattr(self.ui, "cmbRenderMode3D"):
-            self.ui.cmbRenderMode3D.currentIndexChanged.connect(
-                lambda _index=0: self._apply_3d_display_settings()
-            )
+            self.ui.cmbRenderMode3D.currentIndexChanged.connect(self._on_3d_render_mode_changed)
 
         if hasattr(self.ui, "btnResetCamera"):
             self.ui.btnResetCamera.clicked.connect(self._on_reset_3d_camera)
@@ -129,14 +126,17 @@ class MainWindow(QWidget):
         if self._preview_widget_3d is None:
             return
 
+        self._sync_3d_revolve_resolution_range()
+        show_surface = self._get_checkbox_value("chkShowSurface3D", False)
+        self._sync_3d_surface_control_states(show_surface)
+
         self._preview_widget_3d.set_display_options(
             show_profile=self._get_checkbox_value("chkShowProfile3D", True),
             show_scan_path=self._get_checkbox_value("chkShowPath3D", True),
             show_revolution_wireframe=self._get_checkbox_value("chkShowWireframe3D", True),
-            show_surface=self._get_checkbox_value("chkShowSurface3D", False),
+            show_surface=show_surface,
             show_axes=self._get_checkbox_value("chkShowAxis3D", True),
             show_axis_line=self._get_checkbox_value("chkShowAxisLine3D", True),
-            show_text_labels=self._get_checkbox_value("chkShowLabels3D", False),
             refresh=False,
         )
         self._preview_widget_3d.set_render_mode(self._get_render_mode_from_ui(), refresh=False)
@@ -151,6 +151,50 @@ class MainWindow(QWidget):
             refresh=False,
         )
         self._preview_widget_3d.refresh_view()
+
+    def _on_3d_render_mode_changed(self) -> None:
+        """Reconcile resolution bounds when the 3D render mode changes."""
+
+        self._sync_3d_revolve_resolution_range()
+        self._apply_3d_display_settings()
+
+    def _sync_3d_surface_control_states(self, show_surface: bool) -> None:
+        """Enable or disable surface-only controls based on the surface toggle state."""
+
+        for object_name in (
+            "cmbRenderMode3D",
+            "spnRevolveResolution",
+            "dsbSurfaceOpacity",
+            "chkSmoothShading",
+        ):
+            widget = getattr(self.ui, object_name, None)
+            if widget is not None:
+                widget.setEnabled(show_surface)
+
+    def _sync_3d_revolve_resolution_range(self) -> None:
+        """Clamp the revolve-resolution input to the active render-mode range."""
+
+        spinbox = getattr(self.ui, "spnRevolveResolution", None)
+        if spinbox is None:
+            return
+
+        minimum, maximum = self._get_revolve_resolution_limits()
+        spinbox.blockSignals(True)
+        spinbox.setMinimum(minimum)
+        spinbox.setMaximum(maximum)
+        if spinbox.value() < minimum:
+            spinbox.setValue(minimum)
+        elif spinbox.value() > maximum:
+            spinbox.setValue(maximum)
+        spinbox.blockSignals(False)
+
+    def _get_revolve_resolution_limits(self) -> tuple[int, int]:
+        """Return the allowed base revolve-resolution range for the current mode."""
+
+        render_mode = self._get_render_mode_from_ui()
+        if render_mode == "surface_high":
+            return (36, 90)
+        return (12, 90)
 
     def _get_checkbox_value(self, object_name: str, default: bool) -> bool:
         """Return a checkbox value when the widget exists, otherwise a default."""
