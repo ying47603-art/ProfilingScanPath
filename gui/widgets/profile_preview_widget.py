@@ -109,23 +109,10 @@ class ProfilePreviewWidget(QWidget):
                 linewidth=2.0,
                 label="Profile" if index == 0 else None,
             )
-        self._axes.scatter(
-            [profile_segments[0][0][0]],
-            [profile_segments[0][0][1]],
-            color="#2ca02c",
-            s=42,
-            marker="o",
-            zorder=3,
-            label="Start",
-        )
-        self._axes.scatter(
-            [profile_segments[-1][-1][0]],
-            [profile_segments[-1][-1][1]],
-            color="#d62728",
-            s=42,
-            marker="s",
-            zorder=3,
-            label="End",
+        self._draw_endpoint_markers(
+            start_point=profile_segments[0][0],
+            end_point=profile_segments[-1][-1],
+            include_legend=True,
         )
 
     def _draw_scan_path(self) -> None:
@@ -149,6 +136,40 @@ class ProfilePreviewWidget(QWidget):
                 alpha=0.95,
                 label="Scan Path" if index == 0 else None,
             )
+
+        self._draw_endpoint_markers(
+            start_point=(scan_segments[0][0].probe_x, scan_segments[0][0].probe_z),
+            end_point=(scan_segments[-1][-1].probe_x, scan_segments[-1][-1].probe_z),
+            include_legend=False,
+        )
+
+    def _draw_endpoint_markers(
+        self,
+        *,
+        start_point: tuple[float, float],
+        end_point: tuple[float, float],
+        include_legend: bool,
+    ) -> None:
+        """Draw unified start/end markers for profile and path data."""
+
+        self._axes.scatter(
+            [start_point[0]],
+            [start_point[1]],
+            color="#2ca02c",
+            s=42,
+            marker="o",
+            zorder=3,
+            label="Start" if include_legend else None,
+        )
+        self._axes.scatter(
+            [end_point[0]],
+            [end_point[1]],
+            color="#d62728",
+            s=42,
+            marker="s",
+            zorder=3,
+            label="End" if include_legend else None,
+        )
 
     def _draw_empty_hint(self) -> None:
         """Keep the empty-state view clean while preserving axes and grid."""

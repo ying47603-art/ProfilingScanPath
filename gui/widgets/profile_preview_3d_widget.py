@@ -314,9 +314,9 @@ class ProfilePreview3DWidget(QWidget):
         start_marker = pv.Sphere(radius=marker_scale * 0.4, center=start_point)
         end_marker = pv.Cube(
             center=end_point,
-            x_length=marker_scale,
-            y_length=marker_scale,
-            z_length=marker_scale,
+            x_length=marker_scale * 0.5,
+            y_length=marker_scale * 0.5,
+            z_length=marker_scale * 0.5,
         )
         self._plotter.add_mesh(start_marker, color="#2ca02c", smooth_shading=True)
         self._plotter.add_mesh(end_marker, color="#d62728", smooth_shading=False)
@@ -348,23 +348,12 @@ class ProfilePreview3DWidget(QWidget):
                 opacity=0.92,
                 label="Scan Path" if index == 0 else None,
             )
-        self._plotter.add_points(
-            np.asarray([path_points[0]], dtype=float),
-            color="#8e5cff",
-            point_size=10,
-            render_points_as_spheres=True,
-        )
-        self._plotter.add_points(
-            np.asarray([path_points[-1]], dtype=float),
-            color="#00b6cb",
-            point_size=10,
-            render_points_as_spheres=True,
-        )
+        self._draw_path_endpoint_markers(path_points[0], path_points[-1])
 
         if self._show_text_labels:
             self._plotter.add_point_labels(
                 np.asarray([path_points[0], path_points[-1]], dtype=float),
-                ["Path Start", "Path End"],
+                ["Start", "End"],
                 font_size=10,
                 text_color="#444444",
                 shape_opacity=0.12,
@@ -372,6 +361,24 @@ class ProfilePreview3DWidget(QWidget):
                 show_points=False,
                 always_visible=True,
             )
+
+    def _draw_path_endpoint_markers(
+        self,
+        start_point: tuple[float, float, float],
+        end_point: tuple[float, float, float],
+    ) -> None:
+        """Draw scan-path start/end markers using the same semantics as the profile."""
+
+        marker_scale = self._compute_marker_scale()
+        start_marker = pv.Sphere(radius=marker_scale * 0.4, center=start_point)
+        end_marker = pv.Cube(
+            center=end_point,
+            x_length=marker_scale * 0.5,
+            y_length=marker_scale * 0.5,
+            z_length=marker_scale * 0.5,
+        )
+        self._plotter.add_mesh(start_marker, color="#2ca02c", smooth_shading=True)
+        self._plotter.add_mesh(end_marker, color="#d62728", smooth_shading=False)
 
     def _get_profile_points_3d(self) -> list[tuple[float, float, float]]:
         """Return cached 3D profile points in the Y=0 plane."""
@@ -505,9 +512,7 @@ class ProfilePreview3DWidget(QWidget):
         """Build a PyVista polyline from an ordered point list."""
 
         point_array = np.asarray(points, dtype=float)
-        poly_data = pv.PolyData(point_array)
-        poly_data.lines = np.hstack(([len(points)], np.arange(len(points), dtype=np.int32)))
-        return poly_data
+        return pv.lines_from_points(point_array, close=False)
 
     def _get_scene_bounds(self) -> Optional[tuple[float, float, float, float, float, float]]:
         """Return stable scene bounds using profile, path, and virtual revolve extents."""
