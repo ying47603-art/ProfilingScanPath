@@ -30,6 +30,25 @@ def test_generate_scan_path_for_vertical_profile() -> None:
     assert math.isclose(scan_path.points[0].probe_x, 15.0, abs_tol=1e-6)
 
 
+def test_generate_scan_path_for_inner_profile_flips_offset_direction() -> None:
+    """Inner profiles should use the opposite effective normal for offset and tilt."""
+
+    profile_points = [(10.0, 0.0), (10.0, 20.0)]
+    params = ScanParams(
+        s_start=0.0,
+        s_end=20.0,
+        layer_step=10.0,
+        water_distance=5.0,
+    )
+
+    scan_path = generate_scan_path(profile_points, params, profile_kind="inner")
+
+    assert len(scan_path.points) == 3
+    assert all(math.isclose(point.tilt_angle_deg, -90.0, abs_tol=1e-6) for point in scan_path.points)
+    assert math.isclose(scan_path.points[0].probe_x, 5.0, abs_tol=1e-6)
+    assert all(point.probe_x < point.surface_x for point in scan_path.points)
+
+
 def test_generate_scan_path_for_sloped_profile_has_expected_angle() -> None:
     """A cone-like sloped profile should follow the atan2(nx, nz) definition."""
 

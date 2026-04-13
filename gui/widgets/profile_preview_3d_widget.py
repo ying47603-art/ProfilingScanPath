@@ -15,13 +15,14 @@ from data.models import ScanPath
 
 
 class ProfilePreview3DWidget(QWidget):
-    """Render a readable 3D view of the revolved profile and generated path."""
+    """Render active/inactive revolved profiles and the generated scan path."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         """Create the embedded PyVista view and initialize the empty scene."""
 
         super().__init__(parent)
         self._profile_points: list[tuple[float, float]] = []
+        self._reference_profile_points: list[tuple[float, float]] = []
         self._scan_path: Optional[ScanPath] = None
 
         self._show_profile = True
@@ -37,15 +38,16 @@ class ProfilePreview3DWidget(QWidget):
         self._surface_opacity = 0.35
         self._smooth_shading = True
         self._auto_fit_camera = True
+        self._show_probe_body = True
+        self._show_probe_line = True
+        self._probe_diameter = 10.0
+        self._probe_length = 20.0
+        self._current_probe_index: Optional[int] = None
 
-        self._profile_polyline: Optional[pv.PolyData] = None
-        self._profile_segment_polylines: list[pv.PolyData] = []
-        self._profile_points_3d: list[tuple[float, float, float]] = []
         self._wireframe_cache_key: tuple[tuple[tuple[float, float], ...], int] | None = None
         self._wireframe_meshes: list[pv.PolyData] = []
         self._surface_cache_key: tuple[tuple[tuple[float, float], ...], int] | None = None
-        self._surface_mesh: Optional[pv.PolyData] = None
-        self._scan_path_polyline: Optional[pv.PolyData] = None
+        self._surface_meshes: list[pv.PolyData] = []
         self._scan_path_segment_polylines: list[pv.PolyData] = []
         self._scan_path_points_3d: list[tuple[float, float, float]] = []
         self._camera_initialized = False
@@ -58,10 +60,16 @@ class ProfilePreview3DWidget(QWidget):
         self.refresh_view()
 
     def set_profile_points(self, profile_points: Iterable[tuple[float, float]]) -> None:
-        """Store and display the latest extracted profile points."""
+        """Store and display the currently active profile points."""
 
         self._profile_points = list(profile_points)
         self._invalidate_profile_geometry()
+        self.refresh_view()
+
+    def set_reference_profile_points(self, profile_points: Iterable[tuple[float, float]]) -> None:
+        """Store and display the inactive profile points as weak reference geometry."""
+
+        self._reference_profile_points = list(profile_points)
         self.refresh_view()
 
     def set_scan_path(self, scan_path: Optional[ScanPath]) -> None:
@@ -72,9 +80,10 @@ class ProfilePreview3DWidget(QWidget):
         self.refresh_view()
 
     def clear_preview(self) -> None:
-        """Clear both the rendered content and the internal preview state."""
+        """Clear rendered profiles, path data, and cached active geometry."""
 
         self._profile_points = []
+        self._reference_profile_points = []
         self._scan_path = None
         self._invalidate_profile_geometry()
         self._invalidate_scan_path_geometry()
@@ -149,6 +158,43 @@ class ProfilePreview3DWidget(QWidget):
         if refresh:
             self.refresh_view()
 
+    def set_probe_pose_options(
+        self,
+        *,
+        show_probe_body: Optional[bool] = None,
+        show_probe_line: Optional[bool] = None,
+        probe_diameter: Optional[float] = None,
+        probe_length: Optional[float] = None,
+        refresh: bool = True,
+    ) -> None:
+        """Update current-probe visualization options and refresh when requested."""
+
+        if show_probe_body is not None:
+            self._show_probe_body = bool(show_probe_body)
+        if show_probe_line is not None:
+            self._show_probe_line = bool(show_probe_line)
+        if probe_diameter is not None:
+            self._probe_diameter = max(0.1, float(probe_diameter))
+        if probe_length is not None:
+            self._probe_length = max(0.1, float(probe_length))
+
+        if refresh:
+            self.refresh_view()
+
+    def set_current_probe_index(self, index: Optional[int], *, refresh: bool = True) -> None:
+        """Set which scan-path point should drive the single-probe preview."""
+
+        self._current_probe_index = index
+        if refresh:
+            self.refresh_view()
+
+    def clear_probe_pose(self, *, refresh: bool = True) -> None:
+        """Clear the current single-probe preview selection."""
+
+        self._current_probe_index = None
+        if refresh:
+            self.refresh_view()
+
     def reset_camera_view(self) -> None:
         """Reset the scene camera to the default engineering view."""
 
@@ -185,8 +231,7 @@ class ProfilePreview3DWidget(QWidget):
 
         surface_mode_active = self._is_surface_mode()
         if surface_mode_active and self._show_surface and self._profile_points:
-            surface_mesh = self._get_surface_mesh()
-            if surface_mesh is not None:
+            for surface_mesh in self._get_surface_meshes():
                 self._plotter.add_mesh(
                     surface_mesh,
                     color="#9ecae1",
@@ -195,14 +240,31 @@ class ProfilePreview3DWidget(QWidget):
                     show_edges=False,
                 )
 
+        if self._show_profile and self._reference_profile_points:
+            self._draw_profile_polyline(
+                self._reference_profile_points,
+                color="#93b3cb",
+                line_width=1.3,
+                opacity=0.28,
+                show_endpoints=False,
+            )
+
         if self._show_profile and self._profile_points:
-            self._draw_profile_polyline()
+            self._draw_profile_polyline(
+                self._profile_points,
+                color="#1f77b4",
+                line_width=2.0,
+                opacity=1.0,
+                show_endpoints=True,
+            )
 
         if self._show_revolution_wireframe and self._profile_points and not surface_mode_active:
             self._draw_revolution_wireframe(surface_mode=surface_mode_active)
 
         if self._show_scan_path and self._scan_path is not None and self._scan_path.points:
             self._draw_scan_path()
+
+        self._draw_current_probe_pose()
 
         if self._auto_fit_camera or saved_camera is None:
             self._set_default_camera(axis_length=axis_length, scene_bounds=scene_bounds)
@@ -211,17 +273,105 @@ class ProfilePreview3DWidget(QWidget):
 
         self._camera_initialized = True
 
+    def _draw_current_probe_pose(self) -> None:
+        """Draw the currently selected single-probe pose, if available."""
+
+        pose = self._build_current_probe_pose()
+        if pose is None:
+            return
+
+        probe_tip, surface_point, direction = pose
+
+        if self._show_probe_body:
+            probe_body_center = probe_tip - direction * (self._probe_length * 0.5)
+            probe_body = pv.Cylinder(
+                center=probe_body_center,
+                direction=direction,
+                radius=self._probe_diameter * 0.5,
+                height=self._probe_length,
+                resolution=24,
+            )
+            self._plotter.add_mesh(
+                probe_body,
+                color="#9aa7b4",
+                opacity=0.55,
+                smooth_shading=True,
+            )
+
+        if self._show_probe_line:
+            for beam_segment in self._build_dashed_probe_line(probe_tip, surface_point):
+                self._plotter.add_mesh(
+                    beam_segment,
+                    color="#d62728",
+                    line_width=2.2,
+                    opacity=0.95,
+                )
+
+    def _build_current_probe_pose(
+        self,
+    ) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Build tip point, surface point, and axis direction for the current probe."""
+
+        if self._scan_path is None or not self._scan_path.points:
+            return None
+        if self._current_probe_index is None:
+            return None
+        if not 0 <= self._current_probe_index < len(self._scan_path.points):
+            return None
+
+        point = self._scan_path.points[self._current_probe_index]
+        probe_tip = np.asarray(
+            [point.probe_x, point.probe_y, point.probe_z],
+            dtype=float,
+        )
+        surface_point = np.asarray(
+            [point.surface_x, 0.0, point.surface_z],
+            dtype=float,
+        )
+        direction = surface_point - probe_tip
+        norm = np.linalg.norm(direction)
+        if math.isclose(float(norm), 0.0):
+            return None
+        direction /= norm
+        return probe_tip, surface_point, direction
+
+    def _build_dashed_probe_line(
+        self,
+        start_point: np.ndarray,
+        end_point: np.ndarray,
+    ) -> list[pv.PolyData]:
+        """Build short line segments that visually approximate a dashed beam line."""
+
+        vector = end_point - start_point
+        total_length = float(np.linalg.norm(vector))
+        if math.isclose(total_length, 0.0):
+            return []
+
+        direction = vector / total_length
+        dash_length = max(total_length * 0.12, 1.2)
+        gap_length = dash_length * 0.7
+
+        dashed_segments: list[pv.PolyData] = []
+        current_length = 0.0
+        while current_length < total_length:
+            segment_start = start_point + direction * current_length
+            segment_end_length = min(current_length + dash_length, total_length)
+            segment_end = start_point + direction * segment_end_length
+            dashed_segments.append(
+                pv.Line(tuple(segment_start), tuple(segment_end), resolution=1)
+            )
+            current_length += dash_length + gap_length
+
+        return dashed_segments
+
     def _is_surface_mode(self) -> bool:
         """Return whether the current render mode is a true surface mode."""
 
         return self._render_mode in {"surface_low", "surface_high"}
 
     def _invalidate_profile_geometry(self) -> None:
-        """Clear cached geometry derived from the current profile points."""
+        """Clear cached geometry derived from the current active profile points."""
 
-        self._profile_polyline = None
-        self._profile_segment_polylines = []
-        self._profile_points_3d = []
         self._invalidate_wireframe_geometry()
         self._invalidate_surface_geometry()
 
@@ -235,12 +385,11 @@ class ProfilePreview3DWidget(QWidget):
         """Clear cached revolution surface geometry."""
 
         self._surface_cache_key = None
-        self._surface_mesh = None
+        self._surface_meshes = []
 
     def _invalidate_scan_path_geometry(self) -> None:
         """Clear cached geometry derived from the current scan path."""
 
-        self._scan_path_polyline = None
         self._scan_path_segment_polylines = []
         self._scan_path_points_3d = []
 
@@ -274,34 +423,54 @@ class ProfilePreview3DWidget(QWidget):
         axis = pv.Line((0.0, 0.0, z_min), (0.0, 0.0, axis_top), resolution=1)
         self._plotter.add_mesh(axis, color="#8c8c8c", line_width=2.2, opacity=0.82)
 
-    def _draw_profile_polyline(self) -> None:
-        """Draw the extracted profile in the XZ plane."""
+    def _draw_profile_polyline(
+        self,
+        profile_points: list[tuple[float, float]],
+        *,
+        color: str,
+        line_width: float,
+        opacity: float,
+        show_endpoints: bool,
+    ) -> None:
+        """Draw one profile polyline in the XZ plane."""
 
-        profile_points = self._get_profile_points_3d()
-        profile_lines = self._get_profile_segment_polylines()
-        if not profile_lines or not profile_points:
+        profile_lines = self._build_profile_segment_polylines(profile_points)
+        profile_segments = split_profile_segments(profile_points)
+        if not profile_lines or not profile_segments:
             return
 
-        for index, profile_line in enumerate(profile_lines):
+        for profile_line in profile_lines:
             self._plotter.add_mesh(
                 profile_line,
-                color="#1f77b4",
-                line_width=2.0,
-                label="Profile" if index == 0 else None,
+                color=color,
+                line_width=line_width,
+                opacity=opacity,
             )
-        self._draw_profile_endpoint_markers(profile_points[0], profile_points[-1])
 
-        if self._show_text_labels:
-            self._plotter.add_point_labels(
-                np.asarray([profile_points[0], profile_points[-1]], dtype=float),
-                ["Start", "End"],
-                font_size=11,
-                text_color="#333333",
-                shape_opacity=0.15,
-                fill_shape=True,
-                show_points=False,
-                always_visible=True,
+        if show_endpoints:
+            start_point = (
+                profile_segments[0][0][0],
+                0.0,
+                profile_segments[0][0][1],
             )
+            end_point = (
+                profile_segments[-1][-1][0],
+                0.0,
+                profile_segments[-1][-1][1],
+            )
+            self._draw_profile_endpoint_markers(start_point, end_point)
+
+            if self._show_text_labels:
+                self._plotter.add_point_labels(
+                    np.asarray([start_point, end_point], dtype=float),
+                    ["Start", "End"],
+                    font_size=11,
+                    text_color="#333333",
+                    shape_opacity=0.15,
+                    fill_shape=True,
+                    show_points=False,
+                    always_visible=True,
+                )
 
     def _draw_profile_endpoint_markers(
         self,
@@ -340,13 +509,12 @@ class ProfilePreview3DWidget(QWidget):
         if not path_lines or not path_points:
             return
 
-        for index, path_line in enumerate(path_lines):
+        for path_line in path_lines:
             self._plotter.add_mesh(
                 path_line,
                 color="#f28e2b",
                 line_width=2.0,
                 opacity=0.92,
-                label="Scan Path" if index == 0 else None,
             )
         self._draw_path_endpoint_markers(path_points[0], path_points[-1])
 
@@ -380,36 +548,20 @@ class ProfilePreview3DWidget(QWidget):
         self._plotter.add_mesh(start_marker, color="#2ca02c", smooth_shading=True)
         self._plotter.add_mesh(end_marker, color="#d62728", smooth_shading=False)
 
-    def _get_profile_points_3d(self) -> list[tuple[float, float, float]]:
-        """Return cached 3D profile points in the Y=0 plane."""
+    def _build_profile_segment_polylines(self, profile_points: list[tuple[float, float]]) -> list[pv.PolyData]:
+        """Return segment polylines for one profile."""
 
-        if not self._profile_points_3d and self._profile_points:
-            self._profile_points_3d = [(x_value, 0.0, z_value) for x_value, z_value in self._profile_points]
-        return self._profile_points_3d
-
-    def _get_profile_polyline(self) -> Optional[pv.PolyData]:
-        """Return a cached polyline for the current profile."""
-
-        if self._profile_polyline is None and len(self._profile_points) >= 2:
-            self._profile_polyline = self._polyline_from_points(self._get_profile_points_3d())
-        return self._profile_polyline
-
-    def _get_profile_segment_polylines(self) -> list[pv.PolyData]:
-        """Return cached polylines for each non-horizontal profile segment."""
-
-        if self._profile_segment_polylines or len(self._profile_points) < 2:
-            return self._profile_segment_polylines
+        if len(profile_points) < 2:
+            return []
 
         segment_polylines: list[pv.PolyData] = []
-        for segment in split_profile_segments(self._profile_points):
+        for segment in split_profile_segments(profile_points):
             segment_points_3d = [(x_value, 0.0, z_value) for x_value, z_value in segment]
             segment_polylines.append(self._polyline_from_points(segment_points_3d))
-
-        self._profile_segment_polylines = segment_polylines
-        return self._profile_segment_polylines
+        return segment_polylines
 
     def _get_wireframe_meshes(self) -> list[pv.PolyData]:
-        """Return cached sparse revolution wireframe meshes."""
+        """Return cached sparse revolution wireframe meshes for the active profile."""
 
         if len(self._profile_points) < 2:
             return []
@@ -433,30 +585,40 @@ class ProfilePreview3DWidget(QWidget):
             self._wireframe_meshes.append(self._polyline_from_points(rotated_points))
         return self._wireframe_meshes
 
-    def _get_surface_mesh(self) -> Optional[pv.PolyData]:
-        """Return a cached revolved surface mesh built only for display purposes."""
+    def _get_surface_meshes(self) -> list[pv.PolyData]:
+        """Return cached revolved surface meshes built from active sidewall segments."""
 
         if len(self._profile_points) < 2 or not self._is_surface_mode():
-            return None
+            return []
 
         effective_resolution = self._get_effective_surface_resolution()
         profile_key = tuple(self._profile_points)
         cache_key = (profile_key, effective_resolution)
-        if self._surface_cache_key == cache_key and self._surface_mesh is not None:
-            return self._surface_mesh
+        if self._surface_cache_key == cache_key and self._surface_meshes:
+            return self._surface_meshes
 
-        radii = np.asarray([point[0] for point in self._profile_points], dtype=float)
-        z_values = np.asarray([point[1] for point in self._profile_points], dtype=float)
-        angles = np.linspace(0.0, 2.0 * math.pi, effective_resolution + 1)
-
-        x_grid = np.outer(np.cos(angles), radii)
-        y_grid = np.outer(np.sin(angles), radii)
-        z_grid = np.outer(np.ones_like(angles), z_values)
-
-        surface_grid = pv.StructuredGrid(x_grid, y_grid, z_grid)
-        self._surface_mesh = surface_grid.extract_surface(algorithm="dataset_surface").triangulate()
         self._surface_cache_key = cache_key
-        return self._surface_mesh
+        self._surface_meshes = []
+        for segment in self._get_active_surface_segments():
+            radii = np.asarray([point[0] for point in segment], dtype=float)
+            z_values = np.asarray([point[1] for point in segment], dtype=float)
+            angles = np.linspace(0.0, 2.0 * math.pi, effective_resolution + 1)
+
+            x_grid = np.outer(np.cos(angles), radii)
+            y_grid = np.outer(np.sin(angles), radii)
+            z_grid = np.outer(np.ones_like(angles), z_values)
+
+            surface_grid = pv.StructuredGrid(x_grid, y_grid, z_grid)
+            self._surface_meshes.append(
+                surface_grid.extract_surface(algorithm="dataset_surface").triangulate()
+            )
+
+        return self._surface_meshes
+
+    def _get_active_surface_segments(self) -> list[list[tuple[float, float]]]:
+        """Return active non-horizontal sidewall segments eligible for revolution."""
+
+        return [segment for segment in split_profile_segments(self._profile_points) if len(segment) >= 2]
 
     def _get_scan_path_points_3d(self) -> list[tuple[float, float, float]]:
         """Return cached 3D probe points for the current scan path."""
@@ -467,13 +629,6 @@ class ProfilePreview3DWidget(QWidget):
                 for point in self._scan_path.points
             ]
         return self._scan_path_points_3d
-
-    def _get_scan_path_polyline(self) -> Optional[pv.PolyData]:
-        """Return a cached polyline for the current scan path."""
-
-        if self._scan_path_polyline is None and self._scan_path is not None and len(self._scan_path.points) >= 2:
-            self._scan_path_polyline = self._polyline_from_points(self._get_scan_path_points_3d())
-        return self._scan_path_polyline
 
     def _get_scan_path_segment_polylines(self) -> list[pv.PolyData]:
         """Return cached polylines for each independent scan-path segment."""
@@ -515,17 +670,18 @@ class ProfilePreview3DWidget(QWidget):
         return pv.lines_from_points(point_array, close=False)
 
     def _get_scene_bounds(self) -> Optional[tuple[float, float, float, float, float, float]]:
-        """Return stable scene bounds using profile, path, and virtual revolve extents."""
+        """Return stable scene bounds using active/reference profiles and the scan path."""
 
         x_values: list[float] = []
         y_values: list[float] = []
         z_values: list[float] = []
 
-        if self._profile_points:
-            for x_value, z_value in self._profile_points:
-                x_values.extend((-abs(x_value), abs(x_value)))
-                y_values.extend((-abs(x_value), abs(x_value)))
-                z_values.append(z_value)
+        for profile_points in (self._profile_points, self._reference_profile_points):
+            if profile_points:
+                for x_value, z_value in profile_points:
+                    x_values.extend((-abs(x_value), abs(x_value)))
+                    y_values.extend((-abs(x_value), abs(x_value)))
+                    z_values.append(z_value)
 
         if self._scan_path is not None and self._scan_path.points:
             for point in self._scan_path.points:

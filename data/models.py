@@ -76,3 +76,11 @@ class NormalizedStepModel:
     axis_origin: tuple[float, float, float]
     axis_direction: tuple[float, float, float]
     ocp_shape: Optional[Any] = None
+
+
+@dataclass(frozen=True)
+class ExtractedProfiles:
+    """Selectable profile set extracted from one revolved workpiece section."""
+
+    outer_profile_points: list[tuple[float, float]]
+    inner_profile_points: Optional[list[tuple[float, float]]] = None

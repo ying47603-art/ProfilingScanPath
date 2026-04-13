@@ -32,8 +32,11 @@ class MainWindow(QWidget):
 
         self._connect_signals()
         self._reset_result_labels()
+        self._sync_profile_selection_ui()
         self._sync_auto_s_end_value()
         self._apply_3d_display_settings()
+        self._apply_probe_pose_settings()
+        self._update_probe_pose_ui()
         self._update_button_states()
 
     def _init_preview_widgets(self) -> None:
@@ -89,7 +92,20 @@ class MainWindow(QWidget):
         if hasattr(self.ui, "btnReNormalize"):
             self.ui.btnReNormalize.clicked.connect(self._on_renormalize)
 
+        self._connect_profile_selection_controls()
         self._connect_3d_display_controls()
+        self._connect_probe_pose_controls()
+
+    def _connect_profile_selection_controls(self) -> None:
+        """Connect outer/inner profile selection radio buttons."""
+
+        outer_radio = getattr(self.ui, "rdoProfileOuter", None)
+        if outer_radio is not None:
+            outer_radio.toggled.connect(lambda checked: self._on_profile_selection_toggled("outer", checked))
+
+        inner_radio = getattr(self.ui, "rdoProfileInner", None)
+        if inner_radio is not None:
+            inner_radio.toggled.connect(lambda checked: self._on_profile_selection_toggled("inner", checked))
 
     def _connect_3d_display_controls(self) -> None:
         """Connect 3D display setting widgets to the preview control slot."""
@@ -119,6 +135,26 @@ class MainWindow(QWidget):
 
         if hasattr(self.ui, "btnResetCamera"):
             self.ui.btnResetCamera.clicked.connect(self._on_reset_3d_camera)
+
+    def _connect_probe_pose_controls(self) -> None:
+        """Connect probe-pose widgets to the single-probe preview logic."""
+
+        for object_name in (
+            "spnProbelLayerIndex",
+            "dsbProbeDiameter",
+            "dsbProbeLength",
+        ):
+            widget = getattr(self.ui, object_name, None)
+            if widget is not None:
+                widget.valueChanged.connect(lambda _value=0: self._apply_probe_pose_settings())
+
+        for object_name in (
+            "chkShowProbeBody",
+            "chkShowProbeLine",
+        ):
+            checkbox = getattr(self.ui, object_name, None)
+            if checkbox is not None:
+                checkbox.toggled.connect(lambda _checked=False: self._apply_probe_pose_settings())
 
     def _apply_3d_display_settings(self) -> None:
         """Read current GUI settings and apply them to the 3D preview widget."""
@@ -151,6 +187,178 @@ class MainWindow(QWidget):
             refresh=False,
         )
         self._preview_widget_3d.refresh_view()
+
+    def _apply_probe_pose_settings(self) -> None:
+        """Read current probe-pose widgets and apply them to the previews."""
+
+        if self._preview_widget is None and self._preview_widget_3d is None:
+            return
+
+        self._sync_probe_pose_control_states()
+        current_index = self._get_current_probe_index()
+
+        show_probe_body = self._get_checkbox_value("chkShowProbeBody", True)
+        show_probe_line = self._get_checkbox_value("chkShowProbeLine", True)
+        probe_diameter = self._get_float_value("dsbProbeDiameter", 10.0)
+        probe_length = self._get_float_value("dsbProbeLength", 20.0)
+
+        if self._preview_widget is not None:
+            self._preview_widget.set_probe_pose_options(
+                show_probe_body=show_probe_body,
+                show_probe_line=show_probe_line,
+                probe_diameter=probe_diameter,
+                probe_length=probe_length,
+            )
+            self._preview_widget.set_current_probe_index(current_index)
+
+        if self._preview_widget_3d is not None:
+            self._preview_widget_3d.set_probe_pose_options(
+                show_probe_body=show_probe_body,
+                show_probe_line=show_probe_line,
+                probe_diameter=probe_diameter,
+                probe_length=probe_length,
+                refresh=False,
+            )
+            self._preview_widget_3d.set_current_probe_index(current_index, refresh=False)
+            self._preview_widget_3d.refresh_view()
+        self._update_probe_pose_ui()
+
+    def _sync_probe_pose_control_states(self) -> None:
+        """Enable or disable probe-pose widgets based on path availability."""
+
+        has_path = self._controller.scan_path is not None and bool(self._controller.scan_path.points)
+        spinbox = getattr(self.ui, "spnProbelLayerIndex", None)
+        if spinbox is not None:
+            spinbox.blockSignals(True)
+            if has_path:
+                spinbox.setMinimum(0)
+                spinbox.setMaximum(len(self._controller.scan_path.points) - 1)
+                spinbox.setEnabled(True)
+                if spinbox.value() > spinbox.maximum():
+                    spinbox.setValue(spinbox.maximum())
+            else:
+                spinbox.setMinimum(0)
+                spinbox.setMaximum(0)
+                spinbox.setValue(0)
+                spinbox.setEnabled(False)
+            spinbox.blockSignals(False)
+
+        for object_name in (
+            "chkShowProbeBody",
+            "chkShowProbeLine",
+            "dsbProbeDiameter",
+            "dsbProbeLength",
+        ):
+            widget = getattr(self.ui, object_name, None)
+            if widget is not None:
+                widget.setEnabled(has_path)
+
+    def _get_current_probe_index(self) -> int | None:
+        """Return the selected scan-path index when path data is available."""
+
+        if self._controller.scan_path is None or not self._controller.scan_path.points:
+            return None
+
+        spinbox = getattr(self.ui, "spnProbelLayerIndex", None)
+        if spinbox is None:
+            return 0
+
+        return min(max(0, int(spinbox.value())), len(self._controller.scan_path.points) - 1)
+
+    def _update_probe_pose_ui(self) -> None:
+        """Update the current probe X/Y/Z/B readout labels."""
+
+        current_index = self._get_current_probe_index()
+        point = None
+        if current_index is not None and self._controller.scan_path is not None:
+            point = self._controller.scan_path.points[current_index]
+
+        if point is None:
+            for object_name in (
+                "lblProbeXValue",
+                "lblProbeYValue",
+                "lblProbeZValue",
+                "lblProbeBValue",
+            ):
+                self._set_result_text(object_name, "-")
+            return
+
+        self._set_result_text("lblProbeXValue", f"{float(point.probe_x):.6f}")
+        self._set_result_text("lblProbeYValue", f"{float(point.probe_y):.6f}")
+        self._set_result_text("lblProbeZValue", f"{float(point.probe_z):.6f}")
+        self._set_result_text("lblProbeBValue", f"{float(point.tilt_angle_deg):.6f}")
+
+    def _sync_profile_selection_ui(self) -> None:
+        """Update radio-button states to match the current selectable profiles."""
+
+        outer_radio = getattr(self.ui, "rdoProfileOuter", None)
+        inner_radio = getattr(self.ui, "rdoProfileInner", None)
+        has_outer = bool(self._controller.outer_profile_points)
+        has_inner = self._controller.has_inner_profile
+
+        if outer_radio is not None:
+            outer_radio.blockSignals(True)
+            outer_radio.setEnabled(has_outer)
+            outer_radio.setChecked(has_outer and self._controller.active_profile_kind == "outer")
+            outer_radio.blockSignals(False)
+
+        if inner_radio is not None:
+            inner_radio.blockSignals(True)
+            inner_radio.setEnabled(has_inner)
+            inner_radio.setChecked(has_inner and self._controller.active_profile_kind == "inner")
+            inner_radio.blockSignals(False)
+
+    def _refresh_profile_previews(self) -> None:
+        """Push active/inactive profile data into the 2D and 3D preview widgets."""
+
+        active_profile_points = self._controller.profile_points
+        inactive_profile_points = self._controller.inactive_profile_points
+
+        if self._preview_widget is not None:
+            self._preview_widget.set_profile_points(active_profile_points)
+            self._preview_widget.set_reference_profile_points(inactive_profile_points)
+
+        if self._preview_widget_3d is not None:
+            self._preview_widget_3d.set_profile_points(active_profile_points)
+            self._preview_widget_3d.set_reference_profile_points(inactive_profile_points)
+
+    def _clear_path_dependent_views(self) -> None:
+        """Clear all path, probe, and dependent preview state."""
+
+        if self._preview_widget is not None:
+            self._preview_widget.set_scan_path(None)
+            self._preview_widget.clear_probe_pose()
+
+        if self._preview_widget_3d is not None:
+            self._preview_widget_3d.set_scan_path(None)
+            self._preview_widget_3d.clear_probe_pose(refresh=False)
+            self._preview_widget_3d.refresh_view()
+
+        self._apply_probe_pose_settings()
+
+    def _on_profile_selection_toggled(self, profile_kind: str, checked: bool) -> None:
+        """Switch the active profile when the outer/inner radio state changes."""
+
+        if not checked or not self._controller.outer_profile_points:
+            return
+
+        if profile_kind == self._controller.active_profile_kind:
+            return
+
+        try:
+            result = self._controller.set_active_profile(profile_kind)
+            self._apply_profile_stats(result)
+            self._reset_path_labels()
+            self._sync_profile_selection_ui()
+            self._refresh_profile_previews()
+            self._clear_path_dependent_views()
+            self._sync_auto_s_end_value()
+
+            profile_label = "内表面母线" if profile_kind == "inner" else "外表面母线"
+            self._append_log(f"[PROFILE] 当前母线切换为：{profile_label}")
+            self._update_button_states()
+        except Exception as exc:
+            self._handle_error(exc)
 
     def _on_3d_render_mode_changed(self) -> None:
         """Reconcile resolution bounds when the 3D render mode changes."""
@@ -280,11 +488,13 @@ class MainWindow(QWidget):
 
             self._reset_profile_labels()
             self._reset_path_labels()
-            self._sync_auto_s_end_value()
+            self._sync_profile_selection_ui()
             if self._preview_widget is not None:
                 self._preview_widget.clear_preview()
             if self._preview_widget_3d is not None:
                 self._preview_widget_3d.clear_preview()
+            self._sync_auto_s_end_value()
+            self._apply_probe_pose_settings()
 
             self._append_log("[STEP] STEP 文件加载成功")
             self._append_log(f"[STEP] loader_backend={result['loader_backend']}")
@@ -294,11 +504,12 @@ class MainWindow(QWidget):
             self._handle_error(exc)
 
     def _on_extract_profile(self) -> None:
-        """Normalize the current STEP model and extract profile points."""
+        """Normalize the current STEP model and extract selectable profiles."""
 
         try:
             had_path = self._controller.scan_path is not None and bool(self._controller.scan_path.points)
             result = self._controller.extract_profile(samples=int(self.ui.spnSamples.value()))
+            available_profiles = "outer+inner" if bool(result.get("has_inner_profile")) else "outer_only"
             self._refresh_after_profile_change(
                 result=result,
                 action_log="[PROFILE] 母线提取成功",
@@ -306,6 +517,7 @@ class MainWindow(QWidget):
                     f"[PROFILE] point_count={result['profile_point_count']}",
                     f"[PROFILE] x_range={float(result['min_x']):.6f} .. {float(result['max_x']):.6f}",
                     f"[PROFILE] z_range={float(result['min_z']):.6f} .. {float(result['max_z']):.6f}",
+                    f"[PROFILE] available_profiles={available_profiles}",
                 ],
                 had_path=had_path,
             )
@@ -319,18 +531,14 @@ class MainWindow(QWidget):
         detail_logs: list[str],
         had_path: bool,
     ) -> None:
-        """Refresh labels, preview, and path guidance after profile data changes."""
+        """Refresh labels, previews, and path guidance after profile data changes."""
 
         self._apply_profile_stats(result)
         self._reset_path_labels()
+        self._sync_profile_selection_ui()
+        self._refresh_profile_previews()
+        self._clear_path_dependent_views()
         self._sync_auto_s_end_value()
-
-        if self._preview_widget is not None:
-            self._preview_widget.set_profile_points(self._controller.profile_points)
-            self._preview_widget.set_scan_path(None)
-        if self._preview_widget_3d is not None:
-            self._preview_widget_3d.set_profile_points(self._controller.profile_points)
-            self._preview_widget_3d.set_scan_path(None)
 
         self._append_log(action_log)
         for message in detail_logs:
@@ -338,11 +546,11 @@ class MainWindow(QWidget):
         if had_path:
             self._append_log("[PATH] 旧路径已失效，请重新生成路径")
         else:
-            self._append_log("[PATH] 母线已更新，可重新生成路径")
+            self._append_log("[PATH] 当前母线已更新，可重新生成路径")
         self._update_button_states()
 
     def _on_generate_path(self) -> None:
-        """Generate the scan path from the current profile and GUI parameters."""
+        """Generate the scan path from the current active profile and GUI parameters."""
 
         try:
             auto_s_end = hasattr(self.ui, "chkAutoSEnd") and self.ui.chkAutoSEnd.isChecked()
@@ -360,12 +568,12 @@ class MainWindow(QWidget):
                 f"{float(result['min_angle']):.6f} .. {float(result['max_angle']):.6f}",
             )
 
+            self._refresh_profile_previews()
             if self._preview_widget is not None:
-                self._preview_widget.set_profile_points(self._controller.profile_points)
                 self._preview_widget.set_scan_path(self._controller.scan_path)
             if self._preview_widget_3d is not None:
-                self._preview_widget_3d.set_profile_points(self._controller.profile_points)
                 self._preview_widget_3d.set_scan_path(self._controller.scan_path)
+            self._apply_probe_pose_settings()
 
             self._append_log("[PATH] 路径生成成功")
             self._append_log(f"[PATH] scan_point_count={result['scan_point_count']}")
@@ -378,7 +586,7 @@ class MainWindow(QWidget):
             self._handle_error(exc)
 
     def _on_export_csv(self) -> None:
-        """Export profile and scan path CSV files to a selected directory."""
+        """Export active-profile and scan-path CSV files to a selected directory."""
 
         try:
             output_dir = QFileDialog.getExistingDirectory(self, "选择导出目录", str(Path.cwd()))
@@ -395,7 +603,7 @@ class MainWindow(QWidget):
             self._handle_error(exc)
 
     def _on_flip_z_axis(self) -> None:
-        """Flip the current profile on the Z axis and refresh dependent UI state."""
+        """Flip the current selectable profiles on the Z axis and refresh UI state."""
 
         try:
             had_path = self._controller.scan_path is not None and bool(self._controller.scan_path.points)
@@ -412,7 +620,7 @@ class MainWindow(QWidget):
             self._handle_error(exc)
 
     def _on_flip_profile(self) -> None:
-        """Reverse the current profile direction and refresh dependent UI state."""
+        """Reverse the current selectable profile directions and refresh UI state."""
 
         try:
             had_path = self._controller.scan_path is not None and bool(self._controller.scan_path.points)
@@ -429,11 +637,12 @@ class MainWindow(QWidget):
             self._handle_error(exc)
 
     def _on_renormalize(self) -> None:
-        """Re-run normalization and profile extraction for the loaded STEP model."""
+        """Re-run normalization and selectable-profile extraction for the loaded STEP model."""
 
         try:
             had_path = self._controller.scan_path is not None and bool(self._controller.scan_path.points)
             result = self._controller.extract_profile(samples=int(self.ui.spnSamples.value()))
+            available_profiles = "outer+inner" if bool(result.get("has_inner_profile")) else "outer_only"
             self._refresh_after_profile_change(
                 result=result,
                 action_log="[PROFILE] 已执行重新标准化",
@@ -441,6 +650,7 @@ class MainWindow(QWidget):
                     f"[PROFILE] point_count={result['profile_point_count']}",
                     f"[PROFILE] x_range={float(result['min_x']):.6f} .. {float(result['max_x']):.6f}",
                     f"[PROFILE] z_range={float(result['min_z']):.6f} .. {float(result['max_z']):.6f}",
+                    f"[PROFILE] available_profiles={available_profiles}",
                 ],
                 had_path=had_path,
             )

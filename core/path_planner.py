@@ -192,6 +192,8 @@ def compute_normal(
 def generate_scan_path(
     profile_points: Sequence[ProfilePoint],
     params: ScanParams,
+    *,
+    profile_kind: str = "outer",
 ) -> ScanPath:
     """Generate a layered scan path from an extracted XZ profile."""
 
@@ -219,6 +221,8 @@ def generate_scan_path(
     if params.s_end - params.s_start <= FLOAT_TOLERANCE:
         raise ValueError("s_start and s_end must satisfy 0 <= s_start < s_end <= total_arc_length")
 
+    normalized_profile_kind = "inner" if str(profile_kind).strip().lower() == "inner" else "outer"
+
     points: list[PathPoint] = []
     layer_index = 0
     current_s = params.s_start
@@ -231,6 +235,9 @@ def generate_scan_path(
         arc_lengths = segment_arc_lengths[segment_index]
         surface_x, surface_z = interpolate_point(segment_points, arc_lengths, local_s)
         nx, nz = compute_normal(segment_points, arc_lengths, local_s)
+        if normalized_profile_kind == "inner":
+            nx = -nx
+            nz = -nz
 
         probe_x = surface_x + params.water_distance * nx
         probe_z = surface_z + params.water_distance * nz
