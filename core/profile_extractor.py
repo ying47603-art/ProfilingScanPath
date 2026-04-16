@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Union
 
 from core.model_normalizer import normalize_revolved_model
-from core.path_planner import compute_arc_length, interpolate_point
+from core.path_planner import compute_arc_length, interpolate_point, split_profile_segments
 from core.step_loader import load_step_model
-from data.models import ExtractedProfiles, NormalizedStepModel
+from data.models import ExtractedProfileSegments, NormalizedStepModel, ProfileSegment
 
 
 EXTRACTION_ERROR = "STEP model normalization failed"
@@ -21,6 +22,19 @@ PROFILE_COMPLETENESS_RATIO = 0.6
 PROFILE_Z_OVERLAP_RATIO = 0.75
 INNER_PROFILE_MEAN_X_GAP_RATIO = 0.08
 MIN_PROFILE_CHAIN_POINTS = 6
+MIN_POINTS_PER_SUBSEGMENT = 4
+MIN_SUBSEGMENT_LENGTH_RATIO = 0.05
+MIN_SUBSEGMENT_LENGTH_ABS = 1.0
+LINE_TURN_ANGLE_TOL_DEG = 4.0
+ARC_TURN_ANGLE_MIN_DEG = 0.8
+ARC_CUMULATIVE_TURN_MIN_DEG = 4.5
+ARC_TURN_STABILITY_RATIO = 0.8
+ARC_FIT_MIN_POINT_COUNT = 5
+ARC_FIT_MAX_RELATIVE_RESIDUAL = 0.08
+LINE_RECHECK_MIN_POINT_COUNT = 6
+LINE_TO_ARC_MIN_RATIO = 1.003
+LINE_TO_ARC_MIN_TURN_DEG = 6.0
+LINE_TO_ARC_MAX_RELATIVE_RESIDUAL = 0.03
 
 
 @dataclass(frozen=True)
@@ -73,41 +87,59 @@ def extract_profile_points(
     model: NormalizedStepModel,
     num_samples: int = 200,
 ) -> list[tuple[float, float]]:
-    """Extract ordered outer profile points on the Y=0 XZ section."""
+    """Extract one concatenated default working profile for legacy callers."""
 
-    return extract_selectable_profiles(model, num_samples=num_samples).outer_profile_points
+    extracted_segments = extract_profile_segments(model, num_samples=num_samples)
+    concatenated_points: list[tuple[float, float]] = []
+    for profile_segment in extracted_segments.profile_segments:
+        if not concatenated_points:
+            concatenated_points.extend(profile_segment.points)
+            continue
+
+        candidate_points = list(profile_segment.points)
+        distance_to_start = _point_distance(concatenated_points[-1], candidate_points[0])
+        distance_to_end = _point_distance(concatenated_points[-1], candidate_points[-1])
+        if distance_to_end < distance_to_start:
+            candidate_points.reverse()
+
+        if _point_distance(concatenated_points[-1], candidate_points[0]) <= DEDUPLICATION_TOLERANCE:
+            concatenated_points.extend(candidate_points[1:])
+        else:
+            concatenated_points.extend(candidate_points)
+
+    return concatenated_points
 
 
-def extract_selectable_profiles(
+def extract_profile_segments(
     model: NormalizedStepModel,
     num_samples: int = 200,
-) -> ExtractedProfiles:
-    """Extract selectable outer/inner profiles from one normalized workpiece."""
+) -> ExtractedProfileSegments:
+    """Extract all valid selectable profile segments from one normalized workpiece."""
 
     if num_samples < 2:
         raise ValueError("num_samples must be >= 2")
 
     if model.ocp_shape is not None:
-        return _extract_selectable_profiles_from_ocp_shape(model, num_samples)
-    return _extract_selectable_profiles_fallback(model, num_samples)
+        return _extract_profile_segments_from_ocp_shape(model, num_samples)
+    return _extract_profile_segments_fallback(model, num_samples)
 
 
 def load_and_extract_profile(
     file_path: Union[str, Path],
     num_samples: int = 200,
 ) -> list[tuple[float, float]]:
-    """Load a STEP file, normalize it, and extract its outer profile points."""
+    """Load a STEP file, normalize it, and extract one default concatenated profile."""
 
     model = load_step_model(file_path)
     normalized_model = normalize_revolved_model(model)
     return extract_profile_points(normalized_model, num_samples=num_samples)
 
 
-def _extract_selectable_profiles_from_ocp_shape(
+def _extract_profile_segments_from_ocp_shape(
     model: NormalizedStepModel,
     num_samples: int,
-) -> ExtractedProfiles:
-    """Extract selectable outer/inner profiles from the normalized OCP shape."""
+) -> ExtractedProfileSegments:
+    """Extract all valid profile segments from the normalized OCP shape."""
 
     try:
         from OCP.BRepAdaptor import BRepAdaptor_Curve
@@ -171,22 +203,26 @@ def _extract_selectable_profiles_from_ocp_shape(
     for index, chain in enumerate(normalized_chains):
         _profile_debug(_format_chain_stats(index, _build_profile_chain_stats(chain)))
 
-    outer_chain, inner_chain = _select_outer_and_inner_chains(normalized_chains)
-    return ExtractedProfiles(
-        outer_profile_points=_resample_profile_points(outer_chain, num_samples=num_samples),
-        inner_profile_points=(
-            _resample_profile_points(inner_chain, num_samples=num_samples)
-            if inner_chain is not None
-            else None
-        ),
-    )
+    profile_segments = _build_profile_segments_from_chains(normalized_chains, num_samples=num_samples)
+    _profile_debug(f"extracted_segments={len(profile_segments)}")
+    for segment in profile_segments:
+        _profile_debug(
+            f"segment={segment.segment_id} "
+            f"type={segment.segment_type} "
+            f"fit_valid={segment.fit_radius_valid} "
+            f"fit_radius={(segment.fit_radius if segment.fit_radius is not None else float('nan')):.6f} "
+            f"fit_center=("
+            f"{(segment.fit_center_x if segment.fit_center_x is not None else float('nan')):.6f}, "
+            f"{(segment.fit_center_z if segment.fit_center_z is not None else float('nan')):.6f})"
+        )
+    return ExtractedProfileSegments(profile_segments=profile_segments)
 
 
-def _extract_selectable_profiles_fallback(
+def _extract_profile_segments_fallback(
     model: NormalizedStepModel,
     num_samples: int,
-) -> ExtractedProfiles:
-    """Extract selectable profiles from the fallback point-based model."""
+) -> ExtractedProfileSegments:
+    """Extract valid profile segments from the fallback point-based model."""
 
     section_points = [
         (point_x, point_z)
@@ -201,10 +237,712 @@ def _extract_selectable_profiles_fallback(
     if len(deduplicated_points) < 2:
         raise ValueError(EXTRACTION_ERROR)
 
-    return ExtractedProfiles(
-        outer_profile_points=_resample_profile_points(deduplicated_points, num_samples=num_samples),
-        inner_profile_points=None,
+    profile_segments = _build_profile_segments_from_chains([deduplicated_points], num_samples=num_samples)
+    return ExtractedProfileSegments(profile_segments=profile_segments)
+
+
+def _build_profile_segments_from_chains(
+    chains: list[list[tuple[float, float]]],
+    *,
+    num_samples: int,
+) -> list[ProfileSegment]:
+    """Convert merged chains into selectable geometrically segmented profile pieces."""
+
+    if not chains:
+        return []
+
+    chain_sides = _determine_chain_profile_sides(chains)
+    profile_segments: list[ProfileSegment] = []
+    next_segment_id = 0
+    for chain_index, chain in enumerate(chains):
+        chain_side = chain_sides[chain_index]
+        topological_segments = [segment for segment in split_profile_segments(chain) if len(segment) >= 2]
+        for topological_segment in topological_segments:
+            deduplicated_points = _deduplicate_points(topological_segment)
+            if len(deduplicated_points) < 2:
+                continue
+
+            geometric_subsegments = _geometrically_split_segment(deduplicated_points)
+            _profile_debug(
+                f"geometric_split source_chain={chain_index} subsegments={len(geometric_subsegments)}"
+            )
+            for subsegment_index, (segment_type, subsegment_points) in enumerate(geometric_subsegments):
+                sampled_points = _resample_profile_points(subsegment_points, num_samples=max(12, num_samples))
+                segment_stats = _build_profile_chain_stats(sampled_points)
+                normalized_type = segment_type if segment_type in {"line", "arc", "mixed"} else "mixed"
+                fit_center_x = None
+                fit_center_z = None
+                fit_radius = None
+                fit_radius_valid = False
+                fit_residual = None
+                arc_theta_start = None
+                arc_theta_end = None
+                arc_delta_theta = None
+                arc_direction = None
+                arc_length = None
+                arc_geometry_valid = False
+                line_start_x = None
+                line_start_z = None
+                line_end_x = None
+                line_end_z = None
+                line_length = None
+                line_valid = False
+                if normalized_type == "line":
+                    chord_length = _point_distance(sampled_points[0], sampled_points[-1]) if len(sampled_points) >= 2 else 0.0
+                    polyline_length = segment_stats.polyline_length
+                    arc_ratio = (
+                        polyline_length / chord_length
+                        if chord_length > DEDUPLICATION_TOLERANCE
+                        else math.inf
+                    )
+                    total_turn_angle_deg = _compute_total_turn_angle_deg(sampled_points)
+                    (
+                        fit_center_x,
+                        fit_center_z,
+                        fit_radius,
+                        fit_residual,
+                        fit_radius_valid,
+                    ) = _fit_arc_circle(sampled_points)
+                    _profile_debug(f"line_recheck segment={next_segment_id}")
+                    _profile_debug(
+                        f"line_recheck chord_length={chord_length:.6f} "
+                        f"polyline_length={polyline_length:.6f} ratio={arc_ratio:.6f}"
+                    )
+                    _profile_debug(f"line_recheck total_turn_angle={total_turn_angle_deg:.6f}")
+                    _profile_debug(
+                        f"line_recheck circle_fit_valid={fit_radius_valid} "
+                        f"fit_radius={(fit_radius if fit_radius is not None else float('nan')):.6f} "
+                        f"residual={(fit_residual if fit_residual is not None else float('nan')):.6f}"
+                    )
+                    if (
+                        len(sampled_points) >= LINE_RECHECK_MIN_POINT_COUNT
+                        and fit_radius_valid
+                        and fit_residual is not None
+                        and fit_residual <= LINE_TO_ARC_MAX_RELATIVE_RESIDUAL
+                        and arc_ratio >= LINE_TO_ARC_MIN_RATIO
+                        and abs(total_turn_angle_deg) >= LINE_TO_ARC_MIN_TURN_DEG
+                    ):
+                        normalized_type = "arc"
+                        (
+                            arc_theta_start,
+                            arc_theta_end,
+                            arc_delta_theta,
+                            arc_direction,
+                            arc_length,
+                            arc_geometry_valid,
+                        ) = _extract_arc_geometry_from_points(
+                            sampled_points,
+                            fit_center_x=fit_center_x,
+                            fit_center_z=fit_center_z,
+                            fit_radius=fit_radius,
+                            fit_radius_valid=fit_radius_valid,
+                        )
+                        _profile_debug(f"segment={next_segment_id} reclassified line_to_arc")
+                        _profile_debug(f"arc_geometry segment={next_segment_id}")
+                        _profile_debug(
+                            f"arc_theta_start={(arc_theta_start if arc_theta_start is not None else float('nan')):.6f} "
+                            f"arc_theta_end={(arc_theta_end if arc_theta_end is not None else float('nan')):.6f}"
+                        )
+                        _profile_debug(f"arc_direction={(arc_direction if arc_direction is not None else 0)}")
+                        _profile_debug(
+                            f"arc_delta_theta={(arc_delta_theta if arc_delta_theta is not None else float('nan')):.6f}"
+                        )
+                        _profile_debug(
+                            f"arc_length={(arc_length if arc_length is not None else float('nan')):.6f} "
+                            f"arc_geometry_valid={arc_geometry_valid}"
+                        )
+                    else:
+                        fit_center_x = None
+                        fit_center_z = None
+                        fit_radius = None
+                        fit_radius_valid = False
+                        fit_residual = None
+                if normalized_type == "arc":
+                    fit_center_x, fit_center_z, fit_radius, fit_residual, fit_radius_valid = _fit_arc_circle(sampled_points)
+                    _profile_debug(
+                        f"arc_fit segment={next_segment_id} point_count={len(sampled_points)}"
+                    )
+                    _profile_debug(
+                        f"arc_fit center=({fit_center_x if fit_center_x is not None else float('nan'):.6f}, "
+                        f"{fit_center_z if fit_center_z is not None else float('nan'):.6f}) "
+                        f"radius={(fit_radius if fit_radius is not None else float('nan')):.6f} "
+                        f"valid={fit_radius_valid}"
+                    )
+                    _profile_debug(
+                        f"arc_fit residual={(fit_residual if fit_residual is not None else float('nan')):.6f}"
+                    )
+                    (
+                        arc_theta_start,
+                        arc_theta_end,
+                        arc_delta_theta,
+                        arc_direction,
+                        arc_length,
+                        arc_geometry_valid,
+                    ) = _extract_arc_geometry_from_points(
+                        sampled_points,
+                        fit_center_x=fit_center_x,
+                        fit_center_z=fit_center_z,
+                        fit_radius=fit_radius,
+                        fit_radius_valid=fit_radius_valid,
+                    )
+                    _profile_debug(f"arc_geometry segment={next_segment_id}")
+                    _profile_debug(
+                        f"arc_theta_start={(arc_theta_start if arc_theta_start is not None else float('nan')):.6f} "
+                        f"arc_theta_end={(arc_theta_end if arc_theta_end is not None else float('nan')):.6f}"
+                    )
+                    _profile_debug(f"arc_direction={(arc_direction if arc_direction is not None else 0)}")
+                    _profile_debug(
+                        f"arc_delta_theta={(arc_delta_theta if arc_delta_theta is not None else float('nan')):.6f}"
+                    )
+                    _profile_debug(
+                        f"arc_length={(arc_length if arc_length is not None else float('nan')):.6f} "
+                        f"arc_geometry_valid={arc_geometry_valid}"
+                    )
+                if normalized_type == "line":
+                    (
+                        line_start_x,
+                        line_start_z,
+                        line_end_x,
+                        line_end_z,
+                        line_length,
+                        line_valid,
+                    ) = _extract_line_geometry(sampled_points)
+                _profile_debug(
+                    f"subsegment[{subsegment_index}] type={normalized_type} point_count={segment_stats.point_count}"
+                )
+                profile_segments.append(
+                    ProfileSegment(
+                        segment_id=next_segment_id,
+                        name=f"segment_{next_segment_id}",
+                        points=sampled_points,
+                        point_count=segment_stats.point_count,
+                        x_min=segment_stats.x_min,
+                        x_max=segment_stats.x_max,
+                        z_min=segment_stats.z_min,
+                        z_max=segment_stats.z_max,
+                        polyline_length=segment_stats.polyline_length,
+                        segment_type=normalized_type,
+                        profile_side=chain_side,
+                        is_enabled=True,
+                        fit_center_x=fit_center_x,
+                        fit_center_z=fit_center_z,
+                        fit_radius=fit_radius,
+                        fit_radius_valid=fit_radius_valid,
+                        fit_residual=fit_residual,
+                        arc_theta_start=arc_theta_start,
+                        arc_theta_end=arc_theta_end,
+                        arc_delta_theta=arc_delta_theta,
+                        arc_direction=arc_direction,
+                        arc_length=arc_length,
+                        arc_geometry_valid=arc_geometry_valid,
+                        line_start_x=line_start_x,
+                        line_start_z=line_start_z,
+                        line_end_x=line_end_x,
+                        line_end_z=line_end_z,
+                        line_length=line_length,
+                        line_valid=line_valid,
+                    )
+                )
+                next_segment_id += 1
+    return profile_segments
+
+
+def _fit_arc_circle(
+    points: list[tuple[float, float]],
+) -> tuple[float | None, float | None, float | None, float | None, bool]:
+    """Fit one circle to an arc segment using all of its points."""
+
+    if len(points) < ARC_FIT_MIN_POINT_COUNT:
+        return None, None, None, None, False
+
+    sum_x = sum(point[0] for point in points)
+    sum_z = sum(point[1] for point in points)
+    sum_xx = sum(point[0] * point[0] for point in points)
+    sum_zz = sum(point[1] * point[1] for point in points)
+    sum_xz = sum(point[0] * point[1] for point in points)
+    sum_b = sum(point[0] * point[0] + point[1] * point[1] for point in points)
+    sum_xb = sum(point[0] * (point[0] * point[0] + point[1] * point[1]) for point in points)
+    sum_zb = sum(point[1] * (point[0] * point[0] + point[1] * point[1]) for point in points)
+    count = float(len(points))
+
+    matrix = (
+        (sum_xx, sum_xz, sum_x),
+        (sum_xz, sum_zz, sum_z),
+        (sum_x, sum_z, count),
     )
+    rhs = (sum_xb, sum_zb, sum_b)
+    determinant = _determinant3(matrix)
+    if abs(determinant) <= DEDUPLICATION_TOLERANCE:
+        return None, None, None, None, False
+
+    determinant_dx = _determinant3(
+        (
+            (rhs[0], matrix[0][1], matrix[0][2]),
+            (rhs[1], matrix[1][1], matrix[1][2]),
+            (rhs[2], matrix[2][1], matrix[2][2]),
+        )
+    )
+    determinant_dz = _determinant3(
+        (
+            (matrix[0][0], rhs[0], matrix[0][2]),
+            (matrix[1][0], rhs[1], matrix[1][2]),
+            (matrix[2][0], rhs[2], matrix[2][2]),
+        )
+    )
+    determinant_c = _determinant3(
+        (
+            (matrix[0][0], matrix[0][1], rhs[0]),
+            (matrix[1][0], matrix[1][1], rhs[1]),
+            (matrix[2][0], matrix[2][1], rhs[2]),
+        )
+    )
+
+    d_value = determinant_dx / determinant
+    e_value = determinant_dz / determinant
+    c_value = determinant_c / determinant
+    center_x = d_value / 2.0
+    center_z = e_value / 2.0
+    radius_squared = center_x * center_x + center_z * center_z + c_value
+    if radius_squared <= DEDUPLICATION_TOLERANCE:
+        return center_x, center_z, None, None, False
+
+    radius = math.sqrt(radius_squared)
+    radial_errors = [
+        abs(math.hypot(point_x - center_x, point_z - center_z) - radius)
+        for point_x, point_z in points
+    ]
+    mean_abs_error = sum(radial_errors) / len(radial_errors)
+    relative_residual = mean_abs_error / radius if radius > DEDUPLICATION_TOLERANCE else math.inf
+    is_valid = relative_residual <= ARC_FIT_MAX_RELATIVE_RESIDUAL
+    return center_x, center_z, radius, relative_residual, is_valid
+
+
+def _extract_arc_geometry_from_points(
+    points: list[tuple[float, float]],
+    *,
+    fit_center_x: float | None,
+    fit_center_z: float | None,
+    fit_radius: float | None,
+    fit_radius_valid: bool,
+) -> tuple[float | None, float | None, float | None, int | None, float | None, bool]:
+    """Build one stable analytic arc description from all arc-segment points."""
+
+    if not fit_radius_valid or fit_center_x is None or fit_center_z is None or fit_radius is None:
+        return None, None, None, None, None, False
+    if len(points) < 3 or fit_radius <= DEDUPLICATION_TOLERANCE:
+        return None, None, None, None, None, False
+
+    raw_angles = [
+        math.atan2(point_z - fit_center_z, point_x - fit_center_x)
+        for point_x, point_z in points
+    ]
+    unwrapped_angles = [raw_angles[0]]
+    for raw_angle in raw_angles[1:]:
+        delta = _wrap_radians(raw_angle - unwrapped_angles[-1])
+        unwrapped_angles.append(unwrapped_angles[-1] + delta)
+
+    theta_start = float(unwrapped_angles[0])
+    theta_end = float(unwrapped_angles[-1])
+    delta_theta = float(theta_end - theta_start)
+    if math.isclose(delta_theta, 0.0, abs_tol=DEDUPLICATION_TOLERANCE):
+        return None, None, None, None, None, False
+
+    arc_direction = 1 if delta_theta > 0.0 else -1
+    arc_length = abs(delta_theta) * float(fit_radius)
+    if arc_length <= DEDUPLICATION_TOLERANCE:
+        return None, None, None, None, None, False
+
+    return theta_start, theta_end, delta_theta, arc_direction, arc_length, True
+
+
+def _determinant3(matrix: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]) -> float:
+    """Return the determinant of one 3x3 matrix."""
+
+    return (
+        matrix[0][0] * (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1])
+        - matrix[0][1] * (matrix[1][0] * matrix[2][2] - matrix[1][2] * matrix[2][0])
+        + matrix[0][2] * (matrix[1][0] * matrix[2][1] - matrix[1][1] * matrix[2][0])
+    )
+
+
+def _extract_line_geometry(
+    points: list[tuple[float, float]],
+) -> tuple[float | None, float | None, float | None, float | None, float | None, bool]:
+    """Extract one analytic line description from a line-like segment."""
+
+    if len(points) < 2:
+        return None, None, None, None, None, False
+
+    start_x, start_z = points[0]
+    end_x, end_z = points[-1]
+    line_length = math.hypot(end_x - start_x, end_z - start_z)
+    if line_length <= DEDUPLICATION_TOLERANCE:
+        return start_x, start_z, end_x, end_z, None, False
+    return start_x, start_z, end_x, end_z, line_length, True
+
+
+def _compute_total_turn_angle_deg(points: list[tuple[float, float]]) -> float:
+    """Return the signed cumulative tangent-turn angle, in degrees, over one point sequence."""
+
+    turn_values = _compute_turn_values(points)
+    if not turn_values:
+        return 0.0
+    return math.degrees(sum(turn_values))
+
+
+def _geometrically_split_segment(
+    points: list[tuple[float, float]],
+) -> list[tuple[str, list[tuple[float, float]]]]:
+    """Split one merged segment into geometric subsegments without changing merge logic."""
+
+    if len(points) < 3:
+        return [("line", points)]
+
+    point_labels = _classify_segment_points(points)
+    labeled_ranges = _collect_labeled_ranges(point_labels)
+    merged_ranges = _merge_short_labeled_ranges(points, labeled_ranges)
+
+    subsegments: list[tuple[str, list[tuple[float, float]]]] = []
+    for segment_type, start_index, end_index in merged_ranges:
+        subsegment_points = points[start_index : end_index + 1]
+        if len(subsegment_points) < 2:
+            continue
+        subsegments.append((segment_type, subsegment_points))
+
+    return subsegments or [("mixed", points)]
+
+
+def _classify_segment_points(points: list[tuple[float, float]]) -> list[str]:
+    """Classify each point along one merged segment as line, arc, or mixed."""
+
+    if len(points) < 3:
+        return ["line"] * len(points)
+
+    turn_values = _compute_turn_values(points)
+    if not turn_values:
+        return ["line"] * len(points)
+
+    point_labels = ["mixed"] * len(points)
+    turn_signs = [0 for _ in turn_values]
+    arc_core_indices: list[int] = []
+
+    for turn_index, turn_value in enumerate(turn_values):
+        abs_turn_deg = abs(math.degrees(turn_value))
+        if abs_turn_deg <= LINE_TURN_ANGLE_TOL_DEG:
+            continue
+
+        local_window = turn_values[max(0, turn_index - 2) : min(len(turn_values), turn_index + 3)]
+        if _is_stable_arc_window(local_window):
+            arc_core_indices.append(turn_index)
+            turn_signs[turn_index] = 1 if turn_value > 0.0 else -1
+
+    for core_index in arc_core_indices:
+        core_sign = turn_signs[core_index]
+        left_index = core_index
+        right_index = core_index
+
+        while left_index - 1 >= 0 and _is_arc_transition_turn(turn_values[left_index - 1], core_sign):
+            left_index -= 1
+        while right_index + 1 < len(turn_values) and _is_arc_transition_turn(turn_values[right_index + 1], core_sign):
+            right_index += 1
+
+        for turn_index in range(left_index, right_index + 1):
+            point_labels[turn_index + 1] = "arc"
+
+    for index, turn_value in enumerate(turn_values, start=1):
+        if point_labels[index] == "arc":
+            continue
+        abs_turn_deg = abs(math.degrees(turn_value))
+        if abs_turn_deg <= LINE_TURN_ANGLE_TOL_DEG:
+            point_labels[index] = "line"
+
+    point_labels = _smooth_point_labels(point_labels)
+    if len(point_labels) >= 2:
+        point_labels[0] = point_labels[1]
+        point_labels[-1] = point_labels[-2]
+    return point_labels
+
+
+def _compute_turn_values(points: list[tuple[float, float]]) -> list[float]:
+    """Compute signed local turn angles between adjacent edges in one point sequence."""
+
+    edge_angles: list[float] = []
+    for left_point, right_point in zip(points, points[1:]):
+        dx = right_point[0] - left_point[0]
+        dz = right_point[1] - left_point[1]
+        if math.hypot(dx, dz) <= DEDUPLICATION_TOLERANCE:
+            continue
+        edge_angles.append(math.atan2(dz, dx))
+
+    turn_values: list[float] = []
+    for left_angle, right_angle in zip(edge_angles, edge_angles[1:]):
+        turn = right_angle - left_angle
+        while turn > math.pi:
+            turn -= 2.0 * math.pi
+        while turn < -math.pi:
+            turn += 2.0 * math.pi
+        turn_values.append(turn)
+    return turn_values
+
+
+def _is_stable_arc_window(turn_values: list[float]) -> bool:
+    """Return whether one local turn window looks like a stable arc rather than noise."""
+
+    if len(turn_values) < 2:
+        return False
+
+    dominant_turns_deg = _extract_dominant_arc_turns_deg(turn_values)
+    if len(dominant_turns_deg) < 2:
+        return False
+    if min(dominant_turns_deg) < ARC_TURN_ANGLE_MIN_DEG:
+        return False
+    if sum(dominant_turns_deg) < ARC_CUMULATIVE_TURN_MIN_DEG:
+        return False
+
+    mean_turn = sum(dominant_turns_deg) / len(dominant_turns_deg)
+    if mean_turn <= 1e-9:
+        return False
+
+    variance = sum((turn_value - mean_turn) ** 2 for turn_value in dominant_turns_deg) / len(dominant_turns_deg)
+    relative_std = math.sqrt(variance) / mean_turn
+    return relative_std <= ARC_TURN_STABILITY_RATIO
+
+
+def _extract_dominant_arc_turns_deg(turn_values: list[float]) -> list[float]:
+    """Return the dominant-sign non-zero turn magnitudes from one local window."""
+
+    positive_turns = [
+        abs(math.degrees(turn_value))
+        for turn_value in turn_values
+        if turn_value > 0.0 and abs(math.degrees(turn_value)) >= ARC_TURN_ANGLE_MIN_DEG
+    ]
+    negative_turns = [
+        abs(math.degrees(turn_value))
+        for turn_value in turn_values
+        if turn_value < 0.0 and abs(math.degrees(turn_value)) >= ARC_TURN_ANGLE_MIN_DEG
+    ]
+
+    if not positive_turns and not negative_turns:
+        return []
+    if len(positive_turns) > len(negative_turns):
+        return positive_turns
+    if len(negative_turns) > len(positive_turns):
+        return negative_turns
+    return positive_turns if sum(positive_turns) >= sum(negative_turns) else negative_turns
+
+
+def _wrap_radians(delta_rad: float) -> float:
+    """Wrap one radian delta into the shortest signed interval."""
+
+    wrapped = (delta_rad + math.pi) % (2.0 * math.pi) - math.pi
+    if math.isclose(wrapped, -math.pi, abs_tol=DEDUPLICATION_TOLERANCE) and delta_rad > 0.0:
+        return math.pi
+    return wrapped
+
+
+def _is_arc_transition_turn(turn_value: float, expected_sign: int) -> bool:
+    """Return whether one local turn is compatible with a nearby stable arc region."""
+
+    abs_turn_deg = abs(math.degrees(turn_value))
+    if abs_turn_deg < ARC_TURN_ANGLE_MIN_DEG * 0.5:
+        return False
+    if expected_sign == 0:
+        return False
+    turn_sign = 1 if turn_value > 0.0 else -1
+    return turn_sign == expected_sign
+
+
+def _smooth_point_labels(point_labels: list[str]) -> list[str]:
+    """Reduce single-point label noise without turning uncertain regions into false arcs."""
+
+    if len(point_labels) < 3:
+        return point_labels
+
+    smoothed = list(point_labels)
+    for index in range(1, len(point_labels) - 1):
+        left_label = smoothed[index - 1]
+        current_label = smoothed[index]
+        right_label = smoothed[index + 1]
+        if current_label != "mixed":
+            continue
+        if left_label == right_label and left_label in {"line", "arc"}:
+            smoothed[index] = left_label
+    return smoothed
+
+
+def _collect_labeled_ranges(point_labels: list[str]) -> list[tuple[str, int, int]]:
+    """Convert point labels into continuous labeled index ranges."""
+
+    if not point_labels:
+        return []
+
+    ranges: list[tuple[str, int, int]] = []
+    current_label = point_labels[0]
+    start_index = 0
+    for index, label in enumerate(point_labels[1:], start=1):
+        if label == current_label:
+            continue
+        ranges.append((current_label, start_index, index))
+        current_label = label
+        start_index = index
+    ranges.append((current_label, start_index, len(point_labels) - 1))
+    return ranges
+
+
+def _merge_short_labeled_ranges(
+    points: list[tuple[float, float]],
+    labeled_ranges: list[tuple[str, int, int]],
+) -> list[tuple[str, int, int]]:
+    """Merge overly short geometric ranges back into neighbors to avoid fragmentation."""
+
+    if not labeled_ranges:
+        return []
+
+    minimum_length = max(
+        _build_profile_chain_stats(points).polyline_length * MIN_SUBSEGMENT_LENGTH_RATIO,
+        MIN_SUBSEGMENT_LENGTH_ABS,
+    )
+    merged_ranges = list(labeled_ranges)
+    while True:
+        changed = False
+        for index, (segment_type, start_index, end_index) in enumerate(list(merged_ranges)):
+            point_count = end_index - start_index + 1
+            segment_length = _compute_range_length(points, start_index, end_index)
+            if point_count >= MIN_POINTS_PER_SUBSEGMENT or segment_length >= minimum_length:
+                continue
+            if len(merged_ranges) == 1:
+                merged_ranges[0] = ("mixed", start_index, end_index)
+                return merged_ranges
+
+            if index == 0:
+                right_label, _right_start, right_end = merged_ranges[1]
+                merged_ranges[1] = (right_label, start_index, right_end)
+                merged_ranges.pop(0)
+            elif index == len(merged_ranges) - 1:
+                left_label, left_start, _left_end = merged_ranges[index - 1]
+                merged_ranges[index - 1] = (left_label, left_start, end_index)
+                merged_ranges.pop(index)
+            else:
+                left_label, left_start, left_end = merged_ranges[index - 1]
+                right_label, right_start, right_end = merged_ranges[index + 1]
+                left_gap = _compute_range_length(points, left_start, end_index)
+                right_gap = _compute_range_length(points, start_index, right_end)
+                if left_gap <= right_gap:
+                    merged_ranges[index - 1] = (left_label, left_start, end_index)
+                    merged_ranges.pop(index)
+                else:
+                    merged_ranges[index + 1] = (right_label, start_index, right_end)
+                    merged_ranges.pop(index)
+            changed = True
+            break
+        if not changed:
+            break
+
+    normalized_ranges: list[tuple[str, int, int]] = []
+    for segment_type, start_index, end_index in merged_ranges:
+        normalized_type = segment_type if segment_type in {"line", "arc", "mixed"} else "mixed"
+        if normalized_ranges and normalized_ranges[-1][0] == normalized_type:
+            previous_type, previous_start, _previous_end = normalized_ranges[-1]
+            normalized_ranges[-1] = (previous_type, previous_start, end_index)
+        else:
+            normalized_ranges.append((normalized_type, start_index, end_index))
+    return _absorb_transition_mixed_ranges(normalized_ranges)
+
+
+def _absorb_transition_mixed_ranges(
+    labeled_ranges: list[tuple[str, int, int]],
+) -> list[tuple[str, int, int]]:
+    """Absorb short mixed transition buffers into neighboring stable geometric ranges."""
+
+    if not labeled_ranges:
+        return []
+
+    merged_ranges = list(labeled_ranges)
+    while True:
+        changed = False
+        for index, (segment_type, start_index, end_index) in enumerate(list(merged_ranges)):
+            if segment_type != "mixed":
+                continue
+
+            point_count = end_index - start_index + 1
+            if point_count > 3:
+                continue
+
+            left_label = merged_ranges[index - 1][0] if index > 0 else None
+            right_label = merged_ranges[index + 1][0] if index + 1 < len(merged_ranges) else None
+            if left_label == right_label and left_label in {"line", "arc"}:
+                left_start = merged_ranges[index - 1][1]
+                merged_ranges[index - 1] = (left_label, left_start, end_index)
+                merged_ranges.pop(index)
+                changed = True
+                break
+
+            if left_label in {"line", "arc"} and right_label in {"line", "arc"}:
+                right_end = merged_ranges[index + 1][2]
+                merged_ranges[index + 1] = (right_label, start_index, right_end)
+                merged_ranges.pop(index)
+                changed = True
+                break
+
+            if left_label in {"line", "arc"} and right_label is None:
+                left_start = merged_ranges[index - 1][1]
+                merged_ranges[index - 1] = (left_label, left_start, end_index)
+                merged_ranges.pop(index)
+                changed = True
+                break
+
+            if right_label in {"line", "arc"} and left_label is None:
+                right_end = merged_ranges[index + 1][2]
+                merged_ranges[index + 1] = (right_label, start_index, right_end)
+                merged_ranges.pop(index)
+                changed = True
+                break
+
+        if not changed:
+            break
+
+    normalized_ranges: list[tuple[str, int, int]] = []
+    for segment_type, start_index, end_index in merged_ranges:
+        if normalized_ranges and normalized_ranges[-1][0] == segment_type:
+            previous_type, previous_start, _previous_end = normalized_ranges[-1]
+            normalized_ranges[-1] = (previous_type, previous_start, end_index)
+        else:
+            normalized_ranges.append((segment_type, start_index, end_index))
+    return normalized_ranges
+
+
+def _compute_range_length(
+    points: list[tuple[float, float]],
+    start_index: int,
+    end_index: int,
+) -> float:
+    """Return polyline length over one inclusive point-index range."""
+
+    if end_index <= start_index:
+        return 0.0
+    return sum(
+        _point_distance(points[index - 1], points[index])
+        for index in range(start_index + 1, end_index + 1)
+    )
+
+
+def _determine_chain_profile_sides(chains: list[list[tuple[float, float]]]) -> list[str]:
+    """Assign one path-offset side to each merged chain without picking a final profile."""
+
+    chain_stats = [_build_profile_chain_stats(chain) for chain in chains]
+    chain_sides = ["outer"] * len(chains)
+    for index, candidate_stats in enumerate(chain_stats):
+        for reference_stats in chain_stats:
+            if reference_stats.mean_x <= candidate_stats.mean_x:
+                continue
+            if _compute_z_overlap_ratio(candidate_stats, reference_stats) < PROFILE_Z_OVERLAP_RATIO:
+                continue
+            min_mean_x_gap = max(1.0, reference_stats.mean_x * INNER_PROFILE_MEAN_X_GAP_RATIO)
+            if reference_stats.mean_x - candidate_stats.mean_x < min_mean_x_gap:
+                continue
+            chain_sides[index] = "inner"
+            break
+    return chain_sides
 
 
 def _filter_candidate_outer_chains(chains: list[list[tuple[float, float]]]) -> list[list[tuple[float, float]]]:

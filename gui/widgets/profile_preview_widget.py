@@ -10,18 +10,21 @@ from matplotlib.patches import Polygon
 from PyQt6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
 from core.path_planner import split_profile_segments, split_scan_path_segments
-from data.models import ScanPath
+from data.models import ProfileSegment, ScanPath
 
 
 class ProfilePreviewWidget(QWidget):
-    """Render active/inactive XZ profiles and scan-path data inside the GUI."""
+    """Render segment-first XZ profiles and scan-path data inside the GUI."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         """Create the preview canvas and initialize empty-state rendering."""
 
         super().__init__(parent)
         self._profile_points: list[tuple[float, float]] = []
-        self._reference_profile_points: list[tuple[float, float]] = []
+        self._profile_groups: list[list[tuple[float, float]]] = []
+        self._enabled_profile_segments: list[ProfileSegment] = []
+        self._disabled_profile_segments: list[ProfileSegment] = []
+        self._selected_segment_id: int | None = None
         self._scan_path: Optional[ScanPath] = None
         self._show_probe_body = True
         self._show_probe_line = True
@@ -43,29 +46,94 @@ class ProfilePreviewWidget(QWidget):
 
         self.refresh_view()
 
-    def set_profile_points(self, profile_points: Iterable[tuple[float, float]]) -> None:
+    def set_profile_points(
+        self,
+        profile_points: Iterable[tuple[float, float]],
+        *,
+        refresh: bool = True,
+    ) -> None:
         """Store and display the currently active profile points."""
 
         self._profile_points = list(profile_points)
-        self.refresh_view()
+        if refresh:
+            self.refresh_view()
 
-    def set_reference_profile_points(self, profile_points: Iterable[tuple[float, float]]) -> None:
-        """Store and display the inactive profile points as a weak reference."""
+    def set_profile_groups(
+        self,
+        profile_groups: Iterable[Iterable[tuple[float, float]]],
+        *,
+        refresh: bool = True,
+    ) -> None:
+        """Store and display active working-profile groups without cross-group connectors."""
 
-        self._reference_profile_points = list(profile_points)
-        self.refresh_view()
+        self._profile_groups = [list(group) for group in profile_groups]
+        self._profile_points = [point for group in self._profile_groups for point in group]
+        if refresh:
+            self.refresh_view()
 
-    def set_scan_path(self, scan_path: Optional[ScanPath]) -> None:
+    def set_profile_segments(
+        self,
+        *,
+        enabled_segments: Iterable[ProfileSegment],
+        disabled_segments: Iterable[ProfileSegment],
+        selected_segment_id: int | None = None,
+        refresh: bool = True,
+    ) -> None:
+        """Store ordered segment layers for dedicated 2D management preview."""
+
+        self._enabled_profile_segments = [
+            ProfileSegment(
+                segment_id=segment.segment_id,
+                name=segment.name,
+                points=list(segment.points),
+                point_count=segment.point_count,
+                x_min=segment.x_min,
+                x_max=segment.x_max,
+                z_min=segment.z_min,
+                z_max=segment.z_max,
+                polyline_length=segment.polyline_length,
+                segment_type=segment.segment_type,
+                profile_side=segment.profile_side,
+                is_enabled=True,
+            )
+            for segment in enabled_segments
+        ]
+        self._disabled_profile_segments = [
+            ProfileSegment(
+                segment_id=segment.segment_id,
+                name=segment.name,
+                points=list(segment.points),
+                point_count=segment.point_count,
+                x_min=segment.x_min,
+                x_max=segment.x_max,
+                z_min=segment.z_min,
+                z_max=segment.z_max,
+                polyline_length=segment.polyline_length,
+                segment_type=segment.segment_type,
+                profile_side=segment.profile_side,
+                is_enabled=False,
+            )
+            for segment in disabled_segments
+        ]
+        self._selected_segment_id = selected_segment_id
+        if refresh:
+            self.refresh_view()
+
+    def set_scan_path(self, scan_path: Optional[ScanPath], *, refresh: bool = True) -> None:
         """Store and display the latest generated scan path."""
 
         self._scan_path = scan_path
-        self.refresh_view()
+        if refresh:
+            self.refresh_view()
 
     def clear_preview(self) -> None:
         """Clear rendered profiles, path content, and current probe selection."""
 
         self._profile_points = []
-        self._reference_profile_points = []
+        self._profile_groups = []
+        self._enabled_profile_segments = []
+        self._disabled_profile_segments = []
+        self._selected_segment_id = None
         self._scan_path = None
         self._current_probe_index = None
         self.refresh_view()
@@ -77,6 +145,7 @@ class ProfilePreviewWidget(QWidget):
         show_probe_line: Optional[bool] = None,
         probe_diameter: Optional[float] = None,
         probe_length: Optional[float] = None,
+        refresh: bool = True,
     ) -> None:
         """Update the current 2D probe overlay options and refresh immediately."""
 
@@ -88,19 +157,22 @@ class ProfilePreviewWidget(QWidget):
             self._probe_diameter = max(0.1, float(probe_diameter))
         if probe_length is not None:
             self._probe_length = max(0.1, float(probe_length))
-        self.refresh_view()
+        if refresh:
+            self.refresh_view()
 
-    def set_current_probe_index(self, index: Optional[int]) -> None:
+    def set_current_probe_index(self, index: Optional[int], *, refresh: bool = True) -> None:
         """Select which scan-path point should drive the 2D probe overlay."""
 
         self._current_probe_index = index
-        self.refresh_view()
+        if refresh:
+            self.refresh_view()
 
-    def clear_probe_pose(self) -> None:
+    def clear_probe_pose(self, *, refresh: bool = True) -> None:
         """Clear the 2D single-probe overlay selection and redraw."""
 
         self._current_probe_index = None
-        self.refresh_view()
+        if refresh:
+            self.refresh_view()
 
     def refresh_view(self) -> None:
         """Redraw profiles, path data, and the current probe overlay."""
@@ -108,32 +180,36 @@ class ProfilePreviewWidget(QWidget):
         self._axes.clear()
         self._apply_axes_style()
 
-        if self._reference_profile_points:
-            self._draw_profile(
-                self._reference_profile_points,
-                color="#9fbad0",
-                alpha=0.32,
-                linewidth=1.4,
-                include_legend=False,
-                emphasize_endpoints=False,
+        if self._enabled_profile_segments:
+            self._draw_profile_segment_list(
+                self._enabled_profile_segments,
+                color="#4f92b5",
+                alpha=0.62,
+                linewidth=1.15,
+                legend_label="Enabled Segments",
             )
 
-        if self._profile_points:
-            self._draw_profile(
-                self._profile_points,
-                color="#1f77b4",
+        if self._profile_groups:
+            self._draw_profile_groups(
+                self._profile_groups,
+                color="#0d5d7a",
                 alpha=1.0,
-                linewidth=2.0,
-                include_legend=True,
-                emphasize_endpoints=True,
+                linewidth=2.35 if self._enabled_profile_segments else 2.0,
+                legend_label="Active Profiles",
             )
 
         if self._scan_path is not None and self._scan_path.points:
             self._draw_scan_path()
             self._draw_current_probe_pose()
 
-        if not self._profile_points and not self._reference_profile_points and (
+        if (
+            not self._profile_points
+            and not self._profile_groups
+            and not self._enabled_profile_segments
+            and not self._disabled_profile_segments
+            and (
             self._scan_path is None or not self._scan_path.points
+            )
         ):
             self._axes.set_xlim(-10.0, 110.0)
             self._axes.set_ylim(-10.0, 110.0)
@@ -218,7 +294,7 @@ class ProfilePreviewWidget(QWidget):
         color: str,
         alpha: float,
         linewidth: float,
-        include_legend: bool,
+        legend_label: str | None,
         emphasize_endpoints: bool,
     ) -> None:
         """Draw one profile with configurable styling."""
@@ -236,15 +312,40 @@ class ProfilePreviewWidget(QWidget):
                 color=color,
                 linewidth=linewidth,
                 alpha=alpha,
-                label="Profile" if include_legend and index == 0 else None,
+                label=legend_label if legend_label is not None and index == 0 else None,
             )
 
         if emphasize_endpoints:
             self._draw_endpoint_markers(
                 start_point=profile_segments[0][0],
                 end_point=profile_segments[-1][-1],
-                include_legend=include_legend,
+                include_legend=False,
             )
+
+    def _draw_profile_groups(
+        self,
+        profile_groups: list[list[tuple[float, float]]],
+        *,
+        color: str,
+        alpha: float,
+        linewidth: float,
+        legend_label: str | None,
+    ) -> None:
+        """Draw multiple active profile groups without joining them together."""
+
+        label_consumed = False
+        for group in profile_groups:
+            if len(group) < 2:
+                continue
+            self._draw_profile(
+                group,
+                color=color,
+                alpha=alpha,
+                linewidth=linewidth,
+                legend_label=None if label_consumed else legend_label,
+                emphasize_endpoints=True,
+            )
+            label_consumed = True
 
     def _draw_scan_path(self) -> None:
         """Draw probe-path points from the generated scan path."""
@@ -262,9 +363,9 @@ class ProfilePreviewWidget(QWidget):
             self._axes.plot(
                 segment_x,
                 segment_z,
-                color="#ff7f0e",
-                linewidth=1.2,
-                alpha=0.95,
+                color="#f28e2b",
+                linewidth=2.9,
+                alpha=0.98,
                 label="Scan Path" if index == 0 else None,
             )
 
@@ -273,6 +374,38 @@ class ProfilePreviewWidget(QWidget):
             end_point=(scan_segments[-1][-1].probe_x, scan_segments[-1][-1].probe_z),
             include_legend=False,
         )
+
+    def _draw_profile_segment_list(
+        self,
+        segments: list[ProfileSegment],
+        *,
+        color: str,
+        alpha: float,
+        linewidth: float,
+        legend_label: str | None,
+    ) -> None:
+        """Draw explicit profile segments with enabled/disabled styling."""
+
+        for index, segment in enumerate(segments):
+            if len(segment.points) < 2:
+                continue
+
+            segment_x = [point[0] for point in segment.points]
+            segment_z = [point[1] for point in segment.points]
+            current_linewidth = linewidth
+            current_alpha = alpha
+            if self._selected_segment_id == segment.segment_id:
+                current_linewidth += 0.8
+                current_alpha = min(1.0, alpha + 0.2)
+
+            self._axes.plot(
+                segment_x,
+                segment_z,
+                color=color,
+                linewidth=current_linewidth,
+                alpha=current_alpha,
+                label=legend_label if legend_label is not None and index == 0 else None,
+            )
 
     def _draw_endpoint_markers(
         self,
@@ -330,10 +463,14 @@ class ProfilePreviewWidget(QWidget):
         x_values: list[float] = []
         z_values: list[float] = []
 
-        for profile_points in (self._profile_points, self._reference_profile_points):
+        for profile_points in self._profile_groups:
             if profile_points:
                 x_values.extend(point[0] for point in profile_points)
                 z_values.extend(point[1] for point in profile_points)
+
+        for segment in self._enabled_profile_segments + self._disabled_profile_segments:
+            x_values.extend(point[0] for point in segment.points)
+            z_values.extend(point[1] for point in segment.points)
 
         if self._scan_path is not None and self._scan_path.points:
             for segment in split_scan_path_segments(self._scan_path.points):
@@ -359,4 +496,6 @@ class ProfilePreviewWidget(QWidget):
 
         self._axes.set_xlim(center_x - half_span, center_x + half_span)
         self._axes.set_ylim(center_z - half_span, center_z + half_span)
-        self._axes.legend(loc="best", fontsize=8)
+        handles, labels = self._axes.get_legend_handles_labels()
+        if handles and labels:
+            self._axes.legend(loc="best", fontsize=8)
