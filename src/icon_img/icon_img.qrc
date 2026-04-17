@@ -1,0 +1,7 @@
+<RCC>
+  <qresource prefix="icon">
+    <file>down_arrow.svg</file>
+    <file>up_arrow.svg</file>
+    <file>ProbeSet.svg</file>
+  </qresource>
+</RCC>

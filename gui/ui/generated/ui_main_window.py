@@ -250,6 +250,7 @@ class Ui_MainWindow(object):
         sizePolicy.setHeightForWidth(self.btnFlipProfile.sizePolicy().hasHeightForWidth())
         self.btnFlipProfile.setSizePolicy(sizePolicy)
         self.btnFlipProfile.setMinimumSize(QtCore.QSize(120, 32))
+        self.btnFlipProfile.setMaximumSize(QtCore.QSize(120, 16777215))
         font = QtGui.QFont()
         font.setFamily("3ds")
         font.setPointSize(12)
@@ -300,6 +301,7 @@ class Ui_MainWindow(object):
         sizePolicy.setHeightForWidth(self.btnReNormalize.sizePolicy().hasHeightForWidth())
         self.btnReNormalize.setSizePolicy(sizePolicy)
         self.btnReNormalize.setMinimumSize(QtCore.QSize(120, 32))
+        self.btnReNormalize.setMaximumSize(QtCore.QSize(120, 16777215))
         font = QtGui.QFont()
         font.setFamily("3ds")
         font.setPointSize(12)
@@ -368,6 +370,10 @@ class Ui_MainWindow(object):
         font = QtGui.QFont()
         font.setPointSize(9)
         self.btnMoreSet.setFont(font)
+        icon = QtGui.QIcon()
+        icon.addPixmap(QtGui.QPixmap(":/icon/ProbeSet.svg"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
+        self.btnMoreSet.setIcon(icon)
+        self.btnMoreSet.setIconSize(QtCore.QSize(28, 28))
         self.btnMoreSet.setObjectName("btnMoreSet")
         self.gridLayout_4.addWidget(self.btnMoreSet, 1, 2, 1, 1)
         self.verticalLayout_2.addWidget(self.wgt3Dset)
@@ -525,7 +531,7 @@ class Ui_MainWindow(object):
 
     def retranslateUi(self, MainWindow):
         _translate = QtCore.QCoreApplication.translate
-        MainWindow.setWindowTitle(_translate("MainWindow", "ProfilingScanPath v2.0"))
+        MainWindow.setWindowTitle(_translate("MainWindow", "ProfilingScanPath"))
         self.btnOpen.setText(_translate("MainWindow", "加载STEP"))
         self.btnExtract.setText(_translate("MainWindow", "提取轮廓"))
         self.btnGenerate.setText(_translate("MainWindow", "生成路径"))

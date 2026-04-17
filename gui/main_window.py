@@ -24,6 +24,19 @@ class MainWindow(QWidget):
         self._controller = controller
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
+        if hasattr(self.ui, "wgtLeftPanel"):
+            self.ui.wgtLeftPanel.setObjectName("LeftPanelCard")
+        if hasattr(self.ui, "widget"):
+            self.ui.widget.setObjectName("SegmentListCard")
+        if hasattr(self.ui, "wgtLog"):
+            self.ui.wgtLog.setObjectName("LogCard")
+        if hasattr(self.ui, "wgtPreviewCanvas2D"):
+            self.ui.wgtPreviewCanvas2D.setObjectName("Preview2DCard")
+        if hasattr(self.ui, "wgtPreviewCanvas3D"):
+            self.ui.wgtPreviewCanvas3D.setObjectName("Preview3DCard")
+        if hasattr(self.ui, "btnMoreSet"):
+            self.ui.btnMoreSet.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            self.ui.btnMoreSet.setToolTip(self.ui.btnMoreSet.text())
         self._preview_widget: ProfilePreviewWidget | None = None
         self._preview_widget_3d: ProfilePreview3DWidget | None = None
         self._display_set_window: DisplaySetWindow | None = None
