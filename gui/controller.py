@@ -558,6 +558,8 @@ class GuiController:
                     line_end_z=segment.line_end_z,
                     line_length=segment.line_length,
                     line_valid=segment.line_valid,
+                    flip_z_applied=self._flip_z_enabled,
+                    flip_start_applied=self._flip_start_enabled,
                 )
                 for path_point in segment_path.points:
                     points.append(

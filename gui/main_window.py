@@ -93,8 +93,6 @@ class MainWindow(QWidget):
             self.ui.btnExtract.clicked.connect(self._on_extract_profile)
         if hasattr(self.ui, "btnGenerate"):
             self.ui.btnGenerate.clicked.connect(self._on_generate_path)
-        if hasattr(self.ui, "btnInterferenceCheck"):
-            self.ui.btnInterferenceCheck.clicked.connect(self._on_interference_check)
         if hasattr(self.ui, "btnExport"):
             self.ui.btnExport.clicked.connect(self._on_export_csv)
         if hasattr(self.ui, "chkAutoSEnd"):
@@ -117,18 +115,6 @@ class MainWindow(QWidget):
         if list_widget is not None:
             list_widget.itemChanged.connect(self._on_profile_segment_item_changed)
             list_widget.itemSelectionChanged.connect(self._on_profile_segment_selection_changed)
-
-        move_up_button = getattr(self.ui, "btnSegmentMoveUp", None)
-        if move_up_button is not None:
-            move_up_button.clicked.connect(self._on_segment_move_up)
-
-        move_down_button = getattr(self.ui, "btnSegmentMoveDown", None)
-        if move_down_button is not None:
-            move_down_button.clicked.connect(self._on_segment_move_down)
-
-        select_all_button = getattr(self.ui, "btnSegmentSelectAll", None)
-        if select_all_button is not None:
-            select_all_button.clicked.connect(self._on_segment_select_all)
 
     def _connect_profile_transform_controls(self) -> None:
         """Connect checkable profile-transform toolbuttons to controller state."""
@@ -324,7 +310,8 @@ class MainWindow(QWidget):
         list_widget.blockSignals(True)
         list_widget.clear()
         for profile_segment in self._controller.get_profile_segments():
-            item = QListWidgetItem(f"{profile_segment.name} [{profile_segment.segment_type}]")
+            item_text = self._format_segment_list_text(profile_segment)
+            item = QListWidgetItem(item_text)
             item.setData(Qt.ItemDataRole.UserRole, int(profile_segment.segment_id))
             item.setFlags(
                 Qt.ItemFlag.ItemIsEnabled
@@ -335,6 +322,9 @@ class MainWindow(QWidget):
                 Qt.CheckState.Checked if profile_segment.is_enabled else Qt.CheckState.Unchecked
             )
             list_widget.addItem(item)
+            self._append_log(
+                f"[UI_DEBUG] segment item text updated: segment={int(profile_segment.segment_id)}"
+            )
 
         if list_widget.count() > 0:
             list_widget.setCurrentRow(0)
@@ -342,7 +332,23 @@ class MainWindow(QWidget):
         self._append_log("[UI_DEBUG] unblock list signals")
         self._segment_list_updating = False
         self._update_segment_button_states()
-        self._append_log("[UI_DEBUG] populate segment list end")
+        self._append_log("[UI_DEBUG] profile segment list refreshed")
+
+    def _format_segment_list_text(self, segment: ProfileSegment) -> str:
+        """Return one compact single-line segment label including start/end XYZ coordinates."""
+
+        default_text = f"{segment.name} [{segment.segment_type}]"
+        if len(segment.points) < 2:
+            return default_text
+
+        start_point = segment.points[0]
+        end_point = segment.points[-1]
+        return (
+            f"{segment.name} [{segment.segment_type}]  "
+            f"X:({float(start_point[0]):.3f}\u2192{float(end_point[0]):.3f})  "
+            f"Y:0  "
+            f"Z:({float(start_point[1]):.3f}\u2192{float(end_point[1]):.3f})"
+        )
 
     def _collect_profile_segments_from_list(self) -> list[ProfileSegment]:
         """Build an ordered segment list from the current QListWidget state."""
@@ -489,57 +495,6 @@ class MainWindow(QWidget):
         self._refresh_profile_previews(refresh_2d=True, refresh_3d=False)
         self._update_segment_button_states()
 
-    def _on_segment_move_up(self) -> None:
-        """Move the selected segment one row upward while preserving its check state."""
-
-        list_widget = self._get_profile_segment_list_widget()
-        if list_widget is None:
-            return
-
-        current_row = list_widget.currentRow()
-        if current_row <= 0:
-            return
-
-        self._segment_list_updating = True
-        item = list_widget.takeItem(current_row)
-        list_widget.insertItem(current_row - 1, item)
-        list_widget.setCurrentRow(current_row - 1)
-        self._segment_list_updating = False
-        self._apply_profile_segment_selection(log_reordered=True)
-
-    def _on_segment_move_down(self) -> None:
-        """Move the selected segment one row downward while preserving its check state."""
-
-        list_widget = self._get_profile_segment_list_widget()
-        if list_widget is None:
-            return
-
-        current_row = list_widget.currentRow()
-        if current_row < 0 or current_row >= list_widget.count() - 1:
-            return
-
-        self._segment_list_updating = True
-        item = list_widget.takeItem(current_row)
-        list_widget.insertItem(current_row + 1, item)
-        list_widget.setCurrentRow(current_row + 1)
-        self._segment_list_updating = False
-        self._apply_profile_segment_selection(log_reordered=True)
-
-    def _on_segment_select_all(self) -> None:
-        """Check every profile segment in the list and refresh the working profile."""
-
-        list_widget = self._get_profile_segment_list_widget()
-        if list_widget is None:
-            return
-
-        self._segment_list_updating = True
-        list_widget.blockSignals(True)
-        for row in range(list_widget.count()):
-            list_widget.item(row).setCheckState(Qt.CheckState.Checked)
-        list_widget.blockSignals(False)
-        self._segment_list_updating = False
-        self._apply_profile_segment_selection()
-
     def _get_selected_profile_segment_id(self) -> int | None:
         """Return the currently selected profile-segment identifier, if any."""
 
@@ -549,27 +504,13 @@ class MainWindow(QWidget):
         return int(list_widget.currentItem().data(Qt.ItemDataRole.UserRole))
 
     def _update_segment_button_states(self) -> None:
-        """Enable or disable segment-management controls from the current list state."""
+        """Refresh list-selection dependent UI state for the current simplified segment panel."""
 
         list_widget = self._get_profile_segment_list_widget()
         if list_widget is None:
             return
-
-        has_items = list_widget.count() > 0
-        current_row = list_widget.currentRow()
-        has_selection = 0 <= current_row < list_widget.count()
-
-        move_up_button = getattr(self.ui, "btnSegmentMoveUp", None)
-        if move_up_button is not None:
-            move_up_button.setEnabled(has_selection and current_row > 0)
-
-        move_down_button = getattr(self.ui, "btnSegmentMoveDown", None)
-        if move_down_button is not None:
-            move_down_button.setEnabled(has_selection and current_row < list_widget.count() - 1)
-
-        select_all_button = getattr(self.ui, "btnSegmentSelectAll", None)
-        if select_all_button is not None:
-            select_all_button.setEnabled(has_items)
+        if list_widget.count() > 0 and list_widget.currentRow() < 0:
+            list_widget.setCurrentRow(0)
 
     def _refresh_profile_previews(self, *, refresh_2d: bool = True, refresh_3d: bool = True) -> None:
         """Push active/inactive profile data into the 2D and 3D preview widgets."""
@@ -1191,8 +1132,6 @@ class MainWindow(QWidget):
             self.ui.btnDisplaySurface.setEnabled(has_profile)
         if hasattr(self.ui, "btnMoreSet"):
             self.ui.btnMoreSet.setEnabled(has_profile)
-        if hasattr(self.ui, "btnInterferenceCheck"):
-            self.ui.btnInterferenceCheck.setEnabled(has_path)
         if hasattr(self.ui, "btnExport"):
             self.ui.btnExport.setEnabled(has_path)
 

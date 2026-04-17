@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from data.models import ExtractedProfileSegments, ProfileSegment
@@ -462,3 +464,122 @@ def test_generate_path_uses_flip_z_working_arc_geometry() -> None:
         assert flipped_point.surface_z == pytest.approx(mirror_axis_sum - baseline_point.surface_z, abs=1e-6)
         assert flipped_point.probe_x == pytest.approx(baseline_point.probe_x, abs=1e-6)
         assert flipped_point.probe_z == pytest.approx(mirror_axis_sum - baseline_point.probe_z, abs=1e-6)
+
+
+def test_generate_path_uses_flip_z_working_horizontal_line_geometry() -> None:
+    """A horizontal line should stay in sync with flip_z working geometry during path generation."""
+
+    controller = GuiController()
+    controller.set_profile_segments(
+        [
+            ProfileSegment(
+                segment_id=5,
+                name="segment_5",
+                points=[(10.0, 5.0), (30.0, 5.0)],
+                point_count=2,
+                x_min=10.0,
+                x_max=30.0,
+                z_min=5.0,
+                z_max=5.0,
+                polyline_length=20.0,
+                segment_type="line",
+                profile_side="outer",
+                is_enabled=True,
+                line_start_x=10.0,
+                line_start_z=5.0,
+                line_end_x=30.0,
+                line_end_z=5.0,
+                line_length=20.0,
+                line_valid=True,
+            )
+            ,
+            ProfileSegment(
+                segment_id=9,
+                name="segment_9",
+                points=[(10.0, 15.0), (30.0, 15.0)],
+                point_count=2,
+                x_min=10.0,
+                x_max=30.0,
+                z_min=15.0,
+                z_max=15.0,
+                polyline_length=20.0,
+                segment_type="line",
+                profile_side="outer",
+                is_enabled=False,
+                line_start_x=10.0,
+                line_start_z=15.0,
+                line_end_x=30.0,
+                line_end_z=15.0,
+                line_length=20.0,
+                line_valid=True,
+            ),
+        ]
+    )
+
+    baseline = controller.generate_path(
+        s_start=0.0,
+        s_end=None,
+        layer_step=10.0,
+        water_distance=2.0,
+    )
+    baseline_path = controller.scan_path
+    assert baseline["scan_point_count"] == 3
+    assert baseline_path is not None
+    assert all(math.isclose(point.surface_z, 5.0, abs_tol=1e-6) for point in baseline_path.points)
+
+    controller.set_profile_transform_options(flip_z=True)
+    flipped = controller.generate_path(
+        s_start=0.0,
+        s_end=None,
+        layer_step=10.0,
+        water_distance=2.0,
+    )
+    flipped_path = controller.scan_path
+    assert flipped["scan_point_count"] == 3
+    assert flipped_path is not None
+
+    mirror_axis_sum = 20.0
+    for baseline_point, flipped_point in zip(baseline_path.points, flipped_path.points):
+        assert flipped_point.surface_x == pytest.approx(baseline_point.surface_x, abs=1e-6)
+        assert flipped_point.surface_z == pytest.approx(mirror_axis_sum - baseline_point.surface_z, abs=1e-6)
+        assert flipped_point.probe_z == pytest.approx(mirror_axis_sum - baseline_point.probe_z, abs=1e-6)
+
+
+def test_generate_path_uses_flip_start_working_horizontal_line_geometry() -> None:
+    """A horizontal line should regenerate correctly after flip_start reverses its working direction."""
+
+    controller = GuiController()
+    controller.set_profile_segments(
+        [
+            ProfileSegment(
+                segment_id=6,
+                name="segment_6",
+                points=[(10.0, 5.0), (30.0, 5.0)],
+                point_count=2,
+                x_min=10.0,
+                x_max=30.0,
+                z_min=5.0,
+                z_max=5.0,
+                polyline_length=20.0,
+                segment_type="line",
+                profile_side="outer",
+                is_enabled=True,
+                line_start_x=10.0,
+                line_start_z=5.0,
+                line_end_x=30.0,
+                line_end_z=5.0,
+                line_length=20.0,
+                line_valid=True,
+            )
+        ]
+    )
+
+    controller.set_profile_transform_options(flip_start=True)
+    active_segment = controller.active_profile_build_result.oriented_group_segments[0][0]
+
+    assert active_segment.points == [(30.0, 5.0), (10.0, 5.0)]
+    assert active_segment.line_start_x == pytest.approx(30.0, abs=1e-6)
+    assert active_segment.line_end_x == pytest.approx(10.0, abs=1e-6)
+    assert active_segment.line_start_z == pytest.approx(5.0, abs=1e-6)
+    assert active_segment.line_end_z == pytest.approx(5.0, abs=1e-6)
+    assert controller._points_vs_analytic_consistent(active_segment) is True

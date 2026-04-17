@@ -761,7 +761,10 @@ class ProfilePreview3DWidget(QWidget):
     def _get_active_surface_segments(self) -> list[list[tuple[float, float]]]:
         """Return active non-horizontal sidewall segments eligible for revolution."""
 
-        return [segment for segment in self._get_active_profile_segments() if len(segment) >= 2]
+        sidewall_segments: list[list[tuple[float, float]]] = []
+        for segment in self._get_active_profile_segments():
+            sidewall_segments.extend(self._split_non_horizontal_sidewalls(segment))
+        return [segment for segment in sidewall_segments if len(segment) >= 2]
 
     def _get_active_profile_segments(self) -> list[list[tuple[float, float]]]:
         """Return enabled ordered segments, falling back to the active polyline when needed."""
@@ -776,6 +779,30 @@ class ProfilePreview3DWidget(QWidget):
         if len(profile_points) < 2:
             return []
         return [segment for segment in split_profile_segments(profile_points) if len(segment) >= 2]
+
+    def _split_non_horizontal_sidewalls(
+        self,
+        profile_segment: list[tuple[float, float]],
+    ) -> list[list[tuple[float, float]]]:
+        """Split one profile segment into non-horizontal sidewall runs for revolution only."""
+
+        if len(profile_segment) < 2:
+            return []
+
+        sidewall_segments: list[list[tuple[float, float]]] = []
+        current_segment: list[tuple[float, float]] = [profile_segment[0]]
+        for next_point in profile_segment[1:]:
+            current_point = current_segment[-1]
+            if math.isclose(current_point[1], next_point[1], abs_tol=1e-9):
+                if len(current_segment) >= 2:
+                    sidewall_segments.append(current_segment)
+                current_segment = [next_point]
+                continue
+            current_segment.append(next_point)
+
+        if len(current_segment) >= 2:
+            sidewall_segments.append(current_segment)
+        return sidewall_segments
 
     def _build_surface_meshes(
         self,

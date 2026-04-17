@@ -35,6 +35,10 @@ LINE_RECHECK_MIN_POINT_COUNT = 6
 LINE_TO_ARC_MIN_RATIO = 1.003
 LINE_TO_ARC_MIN_TURN_DEG = 6.0
 LINE_TO_ARC_MAX_RELATIVE_RESIDUAL = 0.03
+CORNER_SPLIT_MIN_ANGLE_DEG = 20.0
+CORNER_SPLIT_NEIGHBOR_STEP = 2
+CORNER_SPLIT_MIN_SUBSEGMENT_POINTS = 3
+CORNER_SPLIT_CLUSTER_GAP = 1
 
 
 @dataclass(frozen=True)
@@ -262,7 +266,10 @@ def _build_profile_segments_from_chains(
             if len(deduplicated_points) < 2:
                 continue
 
-            geometric_subsegments = _geometrically_split_segment(deduplicated_points)
+            geometric_subsegments = _geometrically_split_segment(
+                deduplicated_points,
+                source_chain_index=chain_index,
+            )
             _profile_debug(
                 f"geometric_split source_chain={chain_index} subsegments={len(geometric_subsegments)}"
             )
@@ -407,6 +414,14 @@ def _build_profile_segments_from_chains(
                         line_length,
                         line_valid,
                     ) = _extract_line_geometry(sampled_points)
+                    if segment_stats.z_span <= DEDUPLICATION_TOLERANCE:
+                        _profile_debug(
+                            f"horizontal line kept as profile segment segment={next_segment_id}"
+                        )
+                    _profile_debug(
+                        f"segment={next_segment_id} type=line "
+                        f"x_span={segment_stats.x_span:.6f} z_span={segment_stats.z_span:.6f}"
+                    )
                 _profile_debug(
                     f"subsegment[{subsegment_index}] type={normalized_type} point_count={segment_stats.point_count}"
                 )
@@ -592,24 +607,179 @@ def _compute_total_turn_angle_deg(points: list[tuple[float, float]]) -> float:
 
 def _geometrically_split_segment(
     points: list[tuple[float, float]],
+    *,
+    source_chain_index: int | None = None,
 ) -> list[tuple[str, list[tuple[float, float]]]]:
     """Split one merged segment into geometric subsegments without changing merge logic."""
 
     if len(points) < 3:
         return [("line", points)]
 
-    point_labels = _classify_segment_points(points)
-    labeled_ranges = _collect_labeled_ranges(point_labels)
-    merged_ranges = _merge_short_labeled_ranges(points, labeled_ranges)
-
     subsegments: list[tuple[str, list[tuple[float, float]]]] = []
-    for segment_type, start_index, end_index in merged_ranges:
-        subsegment_points = points[start_index : end_index + 1]
-        if len(subsegment_points) < 2:
-            continue
-        subsegments.append((segment_type, subsegment_points))
+    corner_split_segments = _split_segment_at_corners(points, source_chain_index=source_chain_index)
+    for corner_segment in corner_split_segments:
+        point_labels = _classify_segment_points(corner_segment)
+        labeled_ranges = _collect_labeled_ranges(point_labels)
+        merged_ranges = _merge_short_labeled_ranges(corner_segment, labeled_ranges)
+        for segment_type, start_index, end_index in merged_ranges:
+            subsegment_points = corner_segment[start_index : end_index + 1]
+            if len(subsegment_points) < 2:
+                continue
+            subsegments.append((segment_type, subsegment_points))
 
     return subsegments or [("mixed", points)]
+
+
+def _split_segment_at_corners(
+    points: list[tuple[float, float]],
+    *,
+    source_chain_index: int | None = None,
+) -> list[list[tuple[float, float]]]:
+    """Split one merged chain only at strong tangent-discontinuity corners."""
+
+    if source_chain_index is not None:
+        _profile_debug(
+            f"corner_split source_chain={source_chain_index} point_count={len(points)}"
+        )
+
+    if len(points) < max(CORNER_SPLIT_NEIGHBOR_STEP * 2 + 1, CORNER_SPLIT_MIN_SUBSEGMENT_POINTS * 2 - 1):
+        if source_chain_index is not None:
+            _profile_debug("corner_split result subsegments=1")
+        return [points]
+
+    turn_values = _compute_turn_values(points)
+    raw_candidates = _detect_corner_candidates(points, turn_values)
+    accepted_indices = _select_corner_split_indices(points, raw_candidates)
+    if not accepted_indices:
+        if source_chain_index is not None:
+            _profile_debug("corner_split result subsegments=1")
+        return [points]
+
+    split_segments: list[list[tuple[float, float]]] = []
+    start_index = 0
+    for split_index in accepted_indices:
+        split_segments.append(points[start_index : split_index + 1])
+        start_index = split_index
+    split_segments.append(points[start_index:])
+
+    normalized_segments = [
+        segment
+        for segment in split_segments
+        if len(segment) >= 2
+    ]
+    if source_chain_index is not None:
+        _profile_debug(f"corner_split result subsegments={len(normalized_segments)}")
+    return normalized_segments or [points]
+
+
+def _detect_corner_candidates(
+    points: list[tuple[float, float]],
+    turn_values: list[float],
+) -> list[tuple[int, float]]:
+    """Return strong corner candidates based on tangent discontinuity rather than smooth curvature."""
+
+    if len(points) < CORNER_SPLIT_NEIGHBOR_STEP * 2 + 1:
+        return []
+
+    candidates: list[tuple[int, float]] = []
+    for point_index in range(CORNER_SPLIT_NEIGHBOR_STEP, len(points) - CORNER_SPLIT_NEIGHBOR_STEP):
+        left_point = points[point_index - CORNER_SPLIT_NEIGHBOR_STEP]
+        center_point = points[point_index]
+        right_point = points[point_index + CORNER_SPLIT_NEIGHBOR_STEP]
+        previous_tangent = _normalize_vector(
+            center_point[0] - left_point[0],
+            center_point[1] - left_point[1],
+        )
+        next_tangent = _normalize_vector(
+            right_point[0] - center_point[0],
+            right_point[1] - center_point[1],
+        )
+        if previous_tangent is None or next_tangent is None:
+            _profile_debug(f"corner_reject index={point_index} reason=degenerate_tangent")
+            continue
+
+        angle_deg = _angle_between_unit_vectors_deg(previous_tangent, next_tangent)
+        _profile_debug(f"corner_candidate index={point_index} angle_deg={angle_deg:.6f}")
+        if angle_deg < CORNER_SPLIT_MIN_ANGLE_DEG:
+            _profile_debug(f"corner_reject index={point_index} reason=angle_below_threshold")
+            continue
+
+        local_turn_start = max(0, point_index - CORNER_SPLIT_NEIGHBOR_STEP)
+        local_turn_end = min(len(turn_values), point_index + CORNER_SPLIT_NEIGHBOR_STEP)
+        local_turn_window = turn_values[local_turn_start:local_turn_end]
+        if len(local_turn_window) >= 2 and _is_stable_arc_window(local_turn_window):
+            _profile_debug(f"corner_reject index={point_index} reason=smooth_arc_like")
+            continue
+
+        candidates.append((point_index, angle_deg))
+    return candidates
+
+
+def _select_corner_split_indices(
+    points: list[tuple[float, float]],
+    candidates: list[tuple[int, float]],
+) -> list[int]:
+    """Keep only the strongest candidate near each corner and enforce minimum subsegment sizes."""
+
+    if not candidates:
+        return []
+
+    grouped_candidates: list[list[tuple[int, float]]] = []
+    current_group: list[tuple[int, float]] = [candidates[0]]
+    for candidate in candidates[1:]:
+        if candidate[0] - current_group[-1][0] <= CORNER_SPLIT_CLUSTER_GAP:
+            current_group.append(candidate)
+            continue
+        grouped_candidates.append(current_group)
+        current_group = [candidate]
+    grouped_candidates.append(current_group)
+
+    filtered_candidates: list[tuple[int, float]] = []
+    for group in grouped_candidates:
+        strongest_candidate = max(group, key=lambda item: item[1])
+        for candidate_index, _candidate_angle in group:
+            if candidate_index == strongest_candidate[0]:
+                continue
+            _profile_debug(
+                f"corner_reject index={candidate_index} reason=weaker_neighbor_candidate"
+            )
+        filtered_candidates.append(strongest_candidate)
+
+    accepted_indices: list[int] = []
+    previous_split = 0
+    for point_index, angle_deg in filtered_candidates:
+        left_count = point_index - previous_split + 1
+        right_count = len(points) - point_index
+        if left_count < CORNER_SPLIT_MIN_SUBSEGMENT_POINTS:
+            _profile_debug(f"corner_reject index={point_index} reason=left_subsegment_too_short")
+            continue
+        if right_count < CORNER_SPLIT_MIN_SUBSEGMENT_POINTS:
+            _profile_debug(f"corner_reject index={point_index} reason=right_subsegment_too_short")
+            continue
+        accepted_indices.append(point_index)
+        previous_split = point_index
+        _profile_debug(f"corner_accept index={point_index} angle_deg={angle_deg:.6f}")
+
+    return accepted_indices
+
+
+def _normalize_vector(dx: float, dz: float) -> tuple[float, float] | None:
+    """Return one normalized 2D vector, or None when the vector is degenerate."""
+
+    magnitude = math.hypot(dx, dz)
+    if magnitude <= DEDUPLICATION_TOLERANCE:
+        return None
+    return dx / magnitude, dz / magnitude
+
+
+def _angle_between_unit_vectors_deg(
+    left_vector: tuple[float, float],
+    right_vector: tuple[float, float],
+) -> float:
+    """Return the unsigned angle between two already normalized 2D vectors in degrees."""
+
+    dot_value = max(-1.0, min(1.0, left_vector[0] * right_vector[0] + left_vector[1] * right_vector[1]))
+    return math.degrees(math.acos(dot_value))
 
 
 def _classify_segment_points(points: list[tuple[float, float]]) -> list[str]:

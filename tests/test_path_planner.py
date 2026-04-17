@@ -112,6 +112,106 @@ def test_generate_scan_path_for_sloped_profile_has_expected_angle() -> None:
     assert scan_path.points[0].probe_x > scan_path.points[0].surface_x
 
 
+def test_generate_scan_path_for_horizontal_line_uses_line_geometry_stably() -> None:
+    """A perfectly horizontal line should remain a normal line_analytic path segment."""
+
+    profile_points = [(10.0, 5.0), (30.0, 5.0)]
+    params = ScanParams(
+        s_start=0.0,
+        s_end=20.0,
+        layer_step=10.0,
+        water_distance=2.0,
+    )
+
+    scan_path = generate_scan_path(
+        profile_points,
+        params,
+        segment_index=11,
+        segment_type="line",
+        line_start_x=10.0,
+        line_start_z=5.0,
+        line_end_x=30.0,
+        line_end_z=5.0,
+        line_length=20.0,
+        line_valid=True,
+    )
+
+    assert len(scan_path.points) == 3
+    assert all(math.isclose(point.surface_z, 5.0, abs_tol=1e-6) for point in scan_path.points)
+    assert all(math.isclose(point.probe_z, 3.0, abs_tol=1e-6) for point in scan_path.points)
+    assert all(math.isclose(point.tilt_angle_deg, 180.0, abs_tol=1e-6) for point in scan_path.points)
+
+
+def test_generate_scan_path_for_near_horizontal_line_stays_in_line_analytic() -> None:
+    """A near-horizontal line should still behave like a regular analytic line segment."""
+
+    profile_points = [(10.0, 5.0), (30.0, 5.01)]
+    line_length = math.hypot(20.0, 0.01)
+    params = ScanParams(
+        s_start=0.0,
+        s_end=line_length,
+        layer_step=line_length / 2.0,
+        water_distance=2.0,
+    )
+
+    scan_path = generate_scan_path(
+        profile_points,
+        params,
+        segment_index=12,
+        segment_type="line",
+        line_start_x=10.0,
+        line_start_z=5.0,
+        line_end_x=30.0,
+        line_end_z=5.01,
+        line_length=line_length,
+        line_valid=True,
+    )
+
+    assert len(scan_path.points) == 3
+    assert all(math.isclose(point.probe_z - point.surface_z, -2.0, abs_tol=1e-3) for point in scan_path.points)
+
+
+def test_generate_scan_path_for_horizontal_line_reverse_offset_direction_flips_side() -> None:
+    """Reverse offset should flip only the offset side for horizontal lines."""
+
+    profile_points = [(10.0, 5.0), (30.0, 5.0)]
+    params = ScanParams(
+        s_start=0.0,
+        s_end=20.0,
+        layer_step=10.0,
+        water_distance=2.0,
+    )
+
+    default_path = generate_scan_path(
+        profile_points,
+        params,
+        segment_index=13,
+        segment_type="line",
+        line_start_x=10.0,
+        line_start_z=5.0,
+        line_end_x=30.0,
+        line_end_z=5.0,
+        line_length=20.0,
+        line_valid=True,
+    )
+    reversed_path = generate_scan_path(
+        profile_points,
+        params,
+        reverse_offset_direction=True,
+        segment_index=13,
+        segment_type="line",
+        line_start_x=10.0,
+        line_start_z=5.0,
+        line_end_x=30.0,
+        line_end_z=5.0,
+        line_length=20.0,
+        line_valid=True,
+    )
+
+    assert all(math.isclose(point.probe_z, 3.0, abs_tol=1e-6) for point in default_path.points)
+    assert all(math.isclose(point.probe_z, 7.0, abs_tol=1e-6) for point in reversed_path.points)
+
+
 def test_generate_scan_path_keeps_constant_water_distance_on_arc_profile() -> None:
     """Arc-like profiles should keep a constant probe-to-surface distance at every layer."""
 

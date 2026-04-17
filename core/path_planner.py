@@ -20,40 +20,15 @@ LINE_ANALYTIC_MAX_TURN_DEG = 6.0
 
 
 def split_profile_segments(profile_points: Sequence[ProfilePoint]) -> list[list[ProfilePoint]]:
-    """Split a profile into usable non-horizontal segments.
-
-    Horizontal spans are treated as discontinuities so side-wall segments can be
-    processed independently for path generation and preview.
-    """
+    """Return usable profile segments while keeping horizontal lines as formal segments."""
 
     if len(profile_points) < 2:
         return []
-
-    segments: list[list[ProfilePoint]] = []
-    current_segment: list[ProfilePoint] = [profile_points[0]]
-
-    for point in profile_points[1:]:
-        prev_x, prev_z = current_segment[-1]
-        curr_x, curr_z = point
-        dx = curr_x - prev_x
-        dz = curr_z - prev_z
-
-        if math.isclose(dz, 0.0, abs_tol=FLOAT_TOLERANCE) and not math.isclose(dx, 0.0, abs_tol=FLOAT_TOLERANCE):
-            if len(current_segment) >= 2:
-                segments.append(current_segment)
-            current_segment = [point]
-            continue
-
-        current_segment.append(point)
-
-    if len(current_segment) >= 2:
-        segments.append(current_segment)
-
-    return segments
+    return [list(profile_points)]
 
 
 def compute_effective_arc_length(profile_points: Sequence[ProfilePoint]) -> float:
-    """Return the total arc length over non-horizontal usable profile segments."""
+    """Return the total arc length over all usable profile segments, including horizontals."""
 
     total_length = 0.0
     for segment in split_profile_segments(profile_points):
@@ -224,6 +199,8 @@ def generate_scan_path(
     line_end_z: float | None = None,
     line_length: float | None = None,
     line_valid: bool = False,
+    flip_z_applied: bool = False,
+    flip_start_applied: bool = False,
 ) -> ScanPath:
     """Generate a layered scan path from an extracted XZ profile."""
 
@@ -354,6 +331,14 @@ def generate_scan_path(
             f"line_start=({line_geometry['start_point'][0]:.6f}, {line_geometry['start_point'][1]:.6f}) "
             f"line_end=({line_geometry['end_point'][0]:.6f}, {line_geometry['end_point'][1]:.6f})"
         )
+        print(
+            "[PATH_DEBUG] "
+            f"tangent=({line_geometry['tangent'][0]:.6f}, {line_geometry['tangent'][1]:.6f}) "
+            f"normal=({line_geometry['normal'][0]:.6f}, {line_geometry['normal'][1]:.6f}) "
+            f"flip_z={flip_z_applied} "
+            f"flip_start={flip_start_applied} "
+            f"reverse_offset_direction={reverse_offset_direction}"
+        )
     elif geometry_source == "arc_analytic" and arc_geometry is not None:
         print(
             "[PATH_DEBUG] "
@@ -380,6 +365,9 @@ def generate_scan_path(
         if geometry_source == "line_analytic" and line_geometry is not None:
             surface_x, surface_z = _sample_line_surface(line_geometry, clamped_s)
             raw_nx, raw_nz = line_geometry["normal"]
+            if flip_z_applied:
+                raw_nx = -float(raw_nx)
+                raw_nz = -float(raw_nz)
             normal_norm = 1.0
             kappa = 0.0
             local_rho = math.inf

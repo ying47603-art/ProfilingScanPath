@@ -100,3 +100,53 @@ def test_line_recheck_reclassifies_curved_line_candidate_as_arc() -> None:
     assert profile_segments[0].segment_type == "arc"
     assert profile_segments[0].fit_radius_valid is True
     assert profile_segments[0].arc_geometry_valid is True
+
+
+def test_corner_split_breaks_step_profile_into_multiple_segments() -> None:
+    """A step-like profile with sharp corners should split at the obvious corner locations."""
+
+    points = [
+        (100.0, 0.0),
+        (100.0, 10.0),
+        (100.0, 20.0),
+        (90.0, 20.0),
+        (80.0, 20.0),
+        (80.0, 30.0),
+        (80.0, 40.0),
+    ]
+
+    profile_segments = _build_profile_segments_from_chains([points], num_samples=24)
+
+    assert [segment.segment_type for segment in profile_segments] == ["line", "line", "line"]
+    assert len(profile_segments) == 3
+
+
+def test_corner_split_preserves_non_tangent_line_arc_line_as_multiple_segments() -> None:
+    """A non-tangent line-arc-line chain should stay split into distinct geometric segments."""
+
+    line_bottom = [(100.0, value) for value in (0.0, 10.0, 20.0, 30.0, 40.0)]
+    arc_middle = [
+        (100.0 + 20.0 * math.cos(angle), 60.0 + 20.0 * math.sin(angle))
+        for angle in [math.radians(value) for value in (-90, -60, -30, 0, 30)]
+    ]
+    line_top = [(120.0, value) for value in (80.0, 90.0, 100.0, 110.0, 120.0)]
+    points = line_bottom + arc_middle[1:] + line_top[1:]
+
+    profile_segments = _build_profile_segments_from_chains([points], num_samples=32)
+
+    assert [segment.segment_type for segment in profile_segments] == ["line", "arc", "line"]
+
+
+def test_corner_split_does_not_fragment_smooth_arc_profile() -> None:
+    """A smooth arc should remain one segment instead of being chopped at noisy pseudo-corners."""
+
+    radius = 45.0
+    points = [
+        (120.0 + radius * math.cos(angle), 30.0 + radius * math.sin(angle))
+        for angle in [math.radians(value) for value in range(-50, 51, 10)]
+    ]
+
+    profile_segments = _build_profile_segments_from_chains([points], num_samples=28)
+
+    assert len(profile_segments) == 1
+    assert profile_segments[0].segment_type == "arc"

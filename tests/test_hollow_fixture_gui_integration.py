@@ -258,9 +258,42 @@ def test_profile_segment_list_populates_and_rebuilds_active_profile(monkeypatch)
     assert not any(segment.is_enabled for segment in controller.get_profile_segments()[:1])
     assert controller.active_profile_groups
 
-    window._on_segment_select_all()
+    first_item.setCheckState(Qt.CheckState.Checked)
 
     assert all(segment.is_enabled for segment in controller.get_profile_segments())
+
+
+def test_profile_segment_list_text_includes_xyz_endpoint_info(monkeypatch) -> None:
+    """Segment list items should include compact XYZ start/end coordinate summaries."""
+
+    _patch_main_window_3d_widget(monkeypatch)
+
+    _ensure_app()
+    controller = GuiController()
+    window = MainWindow(controller)
+
+    controller.set_profile_segments(
+        [
+            ProfileSegment(
+                segment_id=0,
+                name="segment_0",
+                points=[(100.0, 0.0), (100.0, 100.0)],
+                point_count=2,
+                x_min=100.0,
+                x_max=100.0,
+                z_min=0.0,
+                z_max=100.0,
+                polyline_length=100.0,
+                segment_type="line",
+                profile_side="outer",
+                is_enabled=True,
+            )
+        ]
+    )
+    window._populate_profile_segment_list()
+
+    item_text = window.ui.lstProfileSegments.item(0).text()
+    assert item_text == "segment_0 [line]  X:(100.000→100.000)  Y:0  Z:(0.000→100.000)"
 
 
 def test_auto_s_end_tracks_current_active_profile_groups(monkeypatch) -> None:
